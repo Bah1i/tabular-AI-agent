@@ -3,12 +3,14 @@ import ast
 
 FORBIDDEN_IMPORTS = {
     "os", "sys", "subprocess", "socket", "requests", "pathlib", "shutil",
-    "importlib", "builtins"
+    "importlib", "builtins", "inspect", "pickle", "ctypes", "multiprocessing"
 }
 
 FORBIDDEN_CALLS = {
-    "open", "eval", "exec", "compile", "__import__", "input"
+    "open", "eval", "exec", "compile", "__import__", "input", "globals", "locals", "vars", "dir", "getattr", "setattr", "delattr"
 }
+
+ALLOWED_IMPORTS = {"pandas", "numpy", "re", "math", "datetime"}
 
 
 class StaticValidationError(ValueError):
@@ -32,11 +34,18 @@ def validate_code_safety(code: str) -> None:
                 root = alias.name.split(".")[0]
                 if root in FORBIDDEN_IMPORTS:
                     raise StaticValidationError(f"Forbidden import: {alias.name}")
+                if root not in ALLOWED_IMPORTS:
+                    raise StaticValidationError(f"Import is not allowed: {alias.name}")
 
         if isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".")[0]
             if root in FORBIDDEN_IMPORTS:
                 raise StaticValidationError(f"Forbidden import: {node.module}")
+            if root not in ALLOWED_IMPORTS:
+                raise StaticValidationError(f"Import is not allowed: {node.module}")
+
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            raise StaticValidationError(f"Dunder attribute access is forbidden: {node.attr}")
 
         if isinstance(node, ast.Call):
             func = node.func

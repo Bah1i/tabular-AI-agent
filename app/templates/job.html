@@ -1,1 +1,251 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Задание {{ job.id }}</title><link rel="stylesheet" href="/static/styles.css"></head><body><main class="container"><a href="/">← Назад</a><h1>Задание #{{ job.id }}</h1><section class="card"><p><b>Статус:</b> {{ job.status.value }}</p><p><b>Попыток:</b> {{ job.attempts }}</p><p><b>Файл:</b> {{ job.source_filename }}</p>{% if job.error_message %}<h3>Ошибка</h3><pre>{{ job.error_message }}</pre>{% endif %}{% if job.generated_code %}<h3>Сгенерированный код</h3><pre>{{ job.generated_code }}</pre>{% endif %}{% if job.result_path %}<a class="button" href="/jobs/{{ job.id }}/result">Скачать результат</a>{% else %}<p>Задание еще выполняется. Обновите страницу.</p>{% endif %}</section></main></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Задача {{ job.id }}</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="container">
+  <a href="/">← Назад</a>
+  <h1>Задача #{{ job.id }}</h1>
+
+  <section class="card status-panel">
+    <p><b>Режим:</b> <span id="mode">{{ job.mode }}</span></p>
+    <p><b>Статус:</b> <span id="status">{{ job.status.value }}</span></p>
+    <p><b>Попыток:</b> <span id="attempts">{{ job.attempts }}</span></p>
+    <p><b>Файл:</b> {{ job.source_filename }}</p>
+    <p id="running-note">Система обновляет статус автоматически.</p>
+    <a id="download-link" class="button {% if not job.result_path %}hidden{% endif %}" href="/jobs/{{ job.id }}/result">Скачать результат</a>
+  </section>
+
+  <section class="card">
+    <h2>Таблицы</h2>
+    <div class="button-row">
+      <button type="button" data-preview="source">Показать source</button>
+      {% if job.expected_path %}<button type="button" data-preview="expected">Показать expected</button>{% endif %}
+      <button type="button" data-preview="result">Показать result</button>
+      <button type="button" id="analysis-btn">Анализ source</button>
+    </div>
+    <div id="table-meta"></div>
+    <div class="table-wrap"><table id="preview-table"></table></div>
+    <pre id="analysis-output"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Процесс</h2>
+    <ol id="attempt-history"></ol>
+  </section>
+
+  <section class="card">
+    <h2>Ala-lens события</h2>
+    <div class="button-row">
+      <button type="button" id="load-lens-btn">Показать ala-lens</button>
+    </div>
+    <div id="lens-events" class="lens-events"></div>
+  </section>
+
+  <section class="card">
+    <h2>Объяснение</h2>
+    <pre id="explanation">{{ job.explanation or '' }}</pre>
+  </section>
+
+  <section class="card">
+    <h2>Ошибка</h2>
+    <pre id="error">{{ job.error_message or '' }}</pre>
+  </section>
+
+  <section class="card">
+    <h2>Сгенерированный код</h2>
+    <pre id="code">{{ job.generated_code or '' }}</pre>
+  </section>
+</main>
+
+<script>
+const jobId = {{ job.id }};
+const statusEl = document.getElementById('status');
+const attemptsEl = document.getElementById('attempts');
+const errorEl = document.getElementById('error');
+const codeEl = document.getElementById('code');
+const explanationEl = document.getElementById('explanation');
+const historyEl = document.getElementById('attempt-history');
+const downloadEl = document.getElementById('download-link');
+const runningNote = document.getElementById('running-note');
+
+function renderHistory(items) {
+  historyEl.innerHTML = '';
+  for (const item of items || []) {
+    const li = document.createElement('li');
+    li.textContent = `Попытка ${item.attempt}: ${item.success ? 'успех' : 'ошибка'}; tokens=${item.total_tokens || 0}; ${item.error_message || item.explanation || ''}`;
+    historyEl.appendChild(li);
+  }
+}
+
+async function refreshStatus() {
+  const res = await fetch(`/jobs/${jobId}/status`);
+  if (!res.ok) return;
+  const data = await res.json();
+  statusEl.textContent = data.status;
+  attemptsEl.textContent = data.attempts;
+  errorEl.textContent = data.error_message || '';
+  codeEl.textContent = data.generated_code || '';
+  explanationEl.textContent = data.explanation || '';
+  renderHistory(data.attempt_history);
+  if (data.result_path) downloadEl.classList.remove('hidden');
+  if (data.status === 'success' || data.status === 'failed') {
+    runningNote.textContent = 'Выполнение завершено.';
+    clearInterval(timer);
+  }
+}
+const timer = setInterval(refreshStatus, 2500);
+refreshStatus();
+
+function renderTable(payload) {
+  document.getElementById('table-meta').textContent = `Показано ${payload.rows_shown} из ${payload.rows_total} строк, колонок: ${payload.columns_total}`;
+  const table = document.getElementById('preview-table');
+  table.innerHTML = '';
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  for (const col of payload.columns) {
+    const th = document.createElement('th');
+    th.textContent = col;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const row of payload.rows) {
+    const tr = document.createElement('tr');
+    for (const col of payload.columns) {
+      const td = document.createElement('td');
+      td.textContent = row[col] === null || row[col] === undefined ? '' : row[col];
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+}
+
+document.querySelectorAll('[data-preview]').forEach((btn) => {
+  btn.addEventListener('click', async () => {
+    const kind = btn.getAttribute('data-preview');
+    const res = await fetch(`/jobs/${jobId}/preview/${kind}?limit=100`);
+    if (!res.ok) {
+      document.getElementById('table-meta').textContent = 'Таблица пока недоступна.';
+      return;
+    }
+    renderTable(await res.json());
+  });
+});
+
+document.getElementById('analysis-btn').addEventListener('click', async () => {
+  const res = await fetch(`/jobs/${jobId}/analysis`);
+  document.getElementById('analysis-output').textContent = JSON.stringify(await res.json(), null, 2);
+});
+
+document.getElementById('load-lens-btn').addEventListener('click', async () => {
+  const res = await fetch(`/jobs/${jobId}/ala-lens`);
+  const data = await res.json();
+  const wrap = document.getElementById('lens-events');
+  wrap.innerHTML = '';
+
+  function parseMaybeJson(value) {
+    if (!value) return null;
+    try { return JSON.parse(value); } catch { return value; }
+  }
+
+  function summarizeEvent(event) {
+    const source = parseMaybeJson(event.source_model);
+    const view = parseMaybeJson(event.view_model);
+    const before = parseMaybeJson(event.parameter_before);
+    const after = parseMaybeJson(event.parameter_after);
+    const delta = parseMaybeJson(event.delta);
+    const amendment = parseMaybeJson(event.amendment);
+    const parameter = after || before || {};
+    const plan = parameter.plan || {};
+    const chips = [];
+    if (source?.rows !== undefined) chips.push(`source: ${source.rows} строк, ${(source.columns || []).length} колонок`);
+    if (view?.rows !== undefined) chips.push(`view: ${view.rows} строк, ${(view.columns || []).length} колонок`);
+    if (parameter?.code_hash) chips.push(`p: ${parameter.code_hash}`);
+    if (delta?.value_diffs?.length) chips.push(`diff: ${delta.value_diffs.length}`);
+    if (delta?.rule_violations?.length) chips.push(`rules: ${delta.rule_violations.length}`);
+
+    const ops = plan.operations || [];
+    const selected = plan.selected_columns || [];
+    const params = plan.parameters || {};
+    return {source, view, before, after, delta, amendment, parameter, plan, chips, ops, selected, params};
+  }
+
+  function eventTitle(type) {
+    const names = {
+      get: 'GET: синтез параметра p',
+      delta: 'DELTA: обнаружено несоответствие',
+      amendment: 'AMENDMENT: исправление параметра p',
+      stability: 'STABILITY: согласованность подтверждена'
+    };
+    return names[type] || type;
+  }
+
+  for (const event of data.events || []) {
+    const summaryData = summarizeEvent(event);
+    const item = document.createElement('article');
+    item.className = `lens-event lens-${event.type}`;
+    const header = document.createElement('div');
+    header.className = 'lens-header';
+    const title = document.createElement('h3');
+    title.textContent = `#${event.id} ${eventTitle(event.type)}`;
+    const note = document.createElement('p');
+    note.textContent = event.note || '';
+    header.appendChild(title);
+    header.appendChild(note);
+    item.appendChild(header);
+
+    const chips = document.createElement('div');
+    chips.className = 'lens-chips';
+    summaryData.chips.forEach(text => {
+      const chip = document.createElement('span');
+      chip.textContent = text;
+      chips.appendChild(chip);
+    });
+    item.appendChild(chips);
+
+    const grid = document.createElement('div');
+    grid.className = 'lens-grid';
+    const blocks = [
+      ['Source model', summaryData.source ? `${summaryData.source.rows} строк\n${(summaryData.source.columns || []).join(', ')}` : '—'],
+      ['View model', summaryData.view ? `${summaryData.view.rows} строк\n${(summaryData.view.columns || []).join(', ')}` : '—'],
+      ['Operations', summaryData.ops.length ? summaryData.ops.join('\n') : '—'],
+      ['Selected columns', summaryData.selected.length ? summaryData.selected.join(', ') : '—'],
+      ['Parameters', Object.keys(summaryData.params).length ? JSON.stringify(summaryData.params, null, 2) : '—'],
+      ['Delta', summaryData.delta ? JSON.stringify(summaryData.delta, null, 2) : '—'],
+      ['Amendment', summaryData.amendment ? JSON.stringify(summaryData.amendment, null, 2) : '—']
+    ];
+    blocks.forEach(([label, value]) => {
+      const block = document.createElement('div');
+      block.className = 'lens-block';
+      const h = document.createElement('strong');
+      h.textContent = label;
+      const p = document.createElement('pre');
+      p.textContent = value;
+      block.appendChild(h);
+      block.appendChild(p);
+      grid.appendChild(block);
+    });
+    item.appendChild(grid);
+
+    const details = document.createElement('details');
+    details.className = 'lens-json';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Полный JSON';
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(event, null, 2);
+    details.appendChild(summary);
+    details.appendChild(pre);
+    item.appendChild(details);
+    wrap.appendChild(item);
+  }
+  if (!data.events?.length) wrap.textContent = 'Ala-lens события пока не записаны.';
+});
+</script>
+</body>
+</html>

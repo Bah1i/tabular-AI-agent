@@ -1,0 +1,7 @@
+order_id,product,region,total,date
+1,Laptop,Irkutsk,95000.0,2025-10-01
+2,Mouse,Moscow,3000.0,2025-01-10
+3,Monitor,Kazan,75000.0,2025-11-01
+4,Keyboard,Novosibirsk,28000.0,2025-10-01
+5,Dock,Irkutsk,60000.0,2025-01-10
+6,Camera,Moscow,54000.0,2025-11-01

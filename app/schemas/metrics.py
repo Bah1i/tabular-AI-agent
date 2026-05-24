@@ -7,3 +7,6 @@ class MetricsSummary(BaseModel):
     repair_success_rate: float
     average_attempts: float
     average_latency_seconds: float
+    total_llm_calls: int = 0
+    total_tokens: int = 0
+    total_estimated_cost_usd: float = 0.0

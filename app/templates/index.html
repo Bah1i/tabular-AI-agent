@@ -1,1 +1,248 @@
-<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Tabular AI Agent</title><link rel="stylesheet" href="/static/styles.css"></head><body><main class="container"><h1>Tabular AI Agent</h1><p>ИИ-агент генерирует Python/Pandas-код трансформации таблицы по примеру входа-выхода.</p><section class="card"><h2>Создать задание</h2><form action="/ui/jobs" method="post" enctype="multipart/form-data"><label>Исходная таблица CSV/XLSX</label><input type="file" name="source_file" required><label>Ожидаемый пример результата CSV/XLSX</label><input type="file" name="expected_file" required><label>Инструкция</label><textarea name="instruction" rows="4" placeholder="Например: посчитай total как price * quantity и нормализуй дату"></textarea><button type="submit">Загрузить и поставить в очередь</button></form></section><section class="card"><h2>Метрики</h2><a href="/metrics/summary">Открыть JSON-метрики</a></section></main></body></html>
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Tabular AI Agent</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="container">
+  <header class="page-head">
+    <h1>Tabular AI Agent</h1>
+    <p>Большая исходная таблица, маленький вручную заданный пример результата, безопасная генерация Pandas-кода и проверка на эталоне.</p>
+  </header>
+
+  <section class="card">
+    <h2>Новая задача</h2>
+    <form action="/ui/jobs" method="post" enctype="multipart/form-data">
+      <label>Режим</label>
+      <select name="mode" id="mode">
+        <option value="transform">Трансформация по примеру</option>
+        <option value="query">Аналитический запрос</option>
+      </select>
+
+      <label>Исходная таблица CSV/XLSX/JSON/JSONL/Parquet</label>
+      <div class="drop-zone" data-target="source-file">
+        <strong>Перетащите source сюда</strong>
+        <span>или выберите файл через проводник</span>
+        <input type="file" name="source_file" id="source-file" required>
+        <small id="source-file-name"></small>
+      </div>
+
+      <div id="expected-block">
+        <label>Маленький ожидаемый пример результата</label>
+        <div class="drop-zone" data-target="expected-file">
+          <strong>Перетащите expected сюда</strong>
+          <span>небольшой пример результата для первых строк source</span>
+          <input type="file" name="expected_file" id="expected-file">
+          <small id="expected-file-name"></small>
+        </div>
+      </div>
+
+      <label>Инструкция или аналитический запрос</label>
+      <textarea name="instruction" rows="4" placeholder="Например: посчитай total как price * quantity и нормализуй date к YYYY-MM-DD"></textarea>
+      <div class="button-row">
+        <button type="button" id="preview-source-btn">Предпросмотр source</button>
+        <button type="button" id="preview-expected-btn">Предпросмотр expected</button>
+        <button type="button" id="analyze-source-btn">Анализ source</button>
+      </div>
+      <button type="submit">Запустить</button>
+    </form>
+    <div id="local-preview-toolbar" class="preview-toolbar hidden">
+      <button type="button" id="first-page-btn">В начало</button>
+      <button type="button" id="prev-page-btn">Назад</button>
+      <span id="local-preview-meta"></span>
+      <button type="button" id="next-page-btn">Вперёд</button>
+      <input id="page-size-input" type="number" min="10" max="500" value="50">
+    </div>
+    <div class="table-wrap"><table id="local-preview-table"></table></div>
+    <pre id="local-analysis-output"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Последние задачи</h2>
+    {% if jobs %}
+      <table class="list-table">
+        <thead><tr><th>ID</th><th>Режим</th><th>Статус</th><th>Файл</th><th>Попытки</th></tr></thead>
+        <tbody>
+        {% for job in jobs %}
+          <tr>
+            <td><a href="/ui/jobs/{{ job.id }}">#{{ job.id }}</a></td>
+            <td>{{ job.mode }}</td>
+            <td>{{ job.status.value }}</td>
+            <td>{{ job.source_filename }}</td>
+            <td>{{ job.attempts }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>Задач пока нет.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Метрики</h2>
+    <a href="/metrics/summary">Открыть JSON-метрики</a>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script>
+  const mode = document.getElementById('mode');
+  const expectedBlock = document.getElementById('expected-block');
+  function syncMode() {
+    expectedBlock.style.display = mode.value === 'query' ? 'none' : 'block';
+  }
+  mode.addEventListener('change', syncMode);
+  syncMode();
+
+  const sourceInput = document.getElementById('source-file');
+  const expectedInput = document.getElementById('expected-file');
+  const localTable = document.getElementById('local-preview-table');
+  const localMeta = document.getElementById('local-preview-meta');
+  const localToolbar = document.getElementById('local-preview-toolbar');
+  const analysisOut = document.getElementById('local-analysis-output');
+  let currentPreview = {label: '', rows: [], page: 0, pageSize: 50};
+
+  document.querySelectorAll('.drop-zone').forEach(zone => {
+    const input = document.getElementById(zone.dataset.target);
+    const nameEl = document.getElementById(`${zone.dataset.target}-name`);
+    zone.addEventListener('click', (event) => {
+      if (event.target.tagName !== 'INPUT') input.click();
+    });
+    zone.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      zone.classList.add('drag-over');
+    });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+    zone.addEventListener('drop', (event) => {
+      event.preventDefault();
+      zone.classList.remove('drag-over');
+      if (event.dataTransfer.files.length) {
+        input.files = event.dataTransfer.files;
+        nameEl.textContent = event.dataTransfer.files[0].name;
+      }
+    });
+    input.addEventListener('change', () => {
+      nameEl.textContent = input.files[0]?.name || '';
+    });
+  });
+
+  function parseCsv(text) {
+    const lines = text.replace(/\r/g, '').split('\n').filter(Boolean);
+    const headers = lines[0].split(',').map(x => x.trim());
+    return lines.slice(1).map(line => {
+      const values = line.split(',');
+      const row = {};
+      headers.forEach((h, i) => row[h] = values[i] ?? '');
+      return row;
+    });
+  }
+
+  async function readRows(file) {
+    if (!file) throw new Error('Файл не выбран.');
+    const lower = file.name.toLowerCase();
+    if (lower.endsWith('.csv')) return parseCsv(await file.text());
+    if (lower.endsWith('.json')) {
+      const parsed = JSON.parse(await file.text());
+      return Array.isArray(parsed) ? parsed : [parsed];
+    }
+    if (lower.endsWith('.jsonl') || lower.endsWith('.ndjson')) {
+      return (await file.text()).split('\n').filter(Boolean).map(line => JSON.parse(line));
+    }
+    if ((lower.endsWith('.xlsx') || lower.endsWith('.xls')) && window.XLSX) {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer);
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      return XLSX.utils.sheet_to_json(sheet, {defval: ''});
+    }
+    throw new Error('Предпросмотр в браузере поддерживает CSV, JSON, JSONL и XLSX. Parquet можно проверить после создания задачи.');
+  }
+
+  function renderLocalTable(rows, label, page = 0) {
+    currentPreview.label = label;
+    currentPreview.rows = rows;
+    currentPreview.page = Math.max(0, page);
+    currentPreview.pageSize = Math.max(10, Math.min(500, Number(document.getElementById('page-size-input').value || 50)));
+    localTable.innerHTML = '';
+    analysisOut.textContent = '';
+    if (!rows.length) {
+      localMeta.textContent = `${label}: таблица пустая`;
+      localToolbar.classList.remove('hidden');
+      return;
+    }
+    const start = currentPreview.page * currentPreview.pageSize;
+    const end = Math.min(start + currentPreview.pageSize, rows.length);
+    const visibleRows = rows.slice(start, end);
+    const columns = Object.keys(rows[0]);
+    localToolbar.classList.remove('hidden');
+    localMeta.textContent = `${label}: строки ${start + 1}-${end} из ${rows.length}, колонок: ${columns.length}`;
+    const thead = document.createElement('thead');
+    const hr = document.createElement('tr');
+    columns.forEach(col => {
+      const th = document.createElement('th');
+      th.textContent = col;
+      hr.appendChild(th);
+    });
+    thead.appendChild(hr);
+    localTable.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    visibleRows.forEach(row => {
+      const tr = document.createElement('tr');
+      columns.forEach(col => {
+        const td = document.createElement('td');
+        td.textContent = row[col] ?? '';
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    localTable.appendChild(tbody);
+  }
+
+  function analyzeRows(rows) {
+    if (!rows.length) return {rows: 0, columns: 0, summary: 'Таблица пустая.'};
+    const columns = Object.keys(rows[0]);
+    const result = {rows: rows.length, columns: columns.length, column_stats: []};
+    columns.forEach(col => {
+      const values = rows.map(r => r[col]);
+      const empty = values.filter(v => v === null || v === undefined || String(v).trim() === '').length;
+      const nums = values.map(v => Number(String(v).replace(',', '.'))).filter(v => Number.isFinite(v));
+      const stat = {name: col, empty_count: empty, empty_ratio: rows.length ? empty / rows.length : 0, unique: new Set(values.map(v => String(v))).size};
+      if (nums.length >= Math.max(3, rows.length * 0.5)) {
+        const sorted = nums.slice().sort((a, b) => a - b);
+        stat.semantic_type = 'number';
+        stat.min = sorted[0];
+        stat.max = sorted[sorted.length - 1];
+      } else {
+        stat.semantic_type = stat.unique <= Math.max(20, rows.length * 0.2) ? 'category/text' : 'text';
+      }
+      result.column_stats.push(stat);
+    });
+    result.summary = result.column_stats.some(c => c.empty_ratio > 0.3) ? 'Есть колонки с большим количеством пропусков.' : 'На предпросмотре структура выглядит пригодной.';
+    return result;
+  }
+
+  document.getElementById('preview-source-btn').addEventListener('click', async () => {
+    try { renderLocalTable(await readRows(sourceInput.files[0]), 'source'); }
+    catch (e) { localMeta.textContent = e.message; }
+  });
+  document.getElementById('preview-expected-btn').addEventListener('click', async () => {
+    try { renderLocalTable(await readRows(expectedInput.files[0]), 'expected'); }
+    catch (e) { localMeta.textContent = e.message; }
+  });
+  document.getElementById('analyze-source-btn').addEventListener('click', async () => {
+    try {
+      const rows = await readRows(sourceInput.files[0]);
+      analysisOut.textContent = JSON.stringify(analyzeRows(rows), null, 2);
+    } catch (e) { analysisOut.textContent = e.message; }
+  });
+  document.getElementById('first-page-btn').addEventListener('click', () => renderLocalTable(currentPreview.rows, currentPreview.label, 0));
+  document.getElementById('prev-page-btn').addEventListener('click', () => renderLocalTable(currentPreview.rows, currentPreview.label, currentPreview.page - 1));
+  document.getElementById('next-page-btn').addEventListener('click', () => {
+    const maxPage = Math.floor((currentPreview.rows.length - 1) / currentPreview.pageSize);
+    renderLocalTable(currentPreview.rows, currentPreview.label, Math.min(maxPage, currentPreview.page + 1));
+  });
+  document.getElementById('page-size-input').addEventListener('change', () => renderLocalTable(currentPreview.rows, currentPreview.label, 0));
+</script>
+</body>
+</html>

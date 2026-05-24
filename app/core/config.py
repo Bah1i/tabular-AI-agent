@@ -19,5 +19,11 @@ class Settings(BaseSettings):
     sandbox_shared_dir: str = '/sandbox_runs'
     sandbox_timeout_seconds: int = 15
     max_repair_attempts: int = 3
+    max_prompt_example_rows: int = 25
+    preview_rows: int = 100
+    large_table_row_threshold: int = 50000
+    llm_input_1k_token_price_usd: float = 0.0
+    llm_output_1k_token_price_usd: float = 0.0
+    max_total_llm_tokens_per_job: int = 0
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
 settings = Settings()

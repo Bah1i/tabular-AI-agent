@@ -1,3 +1,7 @@
+import json
+import math
+import pathlib
+
 import pandas as pd
 
 
@@ -7,20 +11,156 @@ def read_table(path: str) -> pd.DataFrame:
         return pd.read_csv(path)
     if lower.endswith(".xlsx") or lower.endswith(".xls"):
         return pd.read_excel(path)
-    raise ValueError("Only CSV and XLSX files are supported.")
+    if lower.endswith(".json"):
+        return pd.read_json(path)
+    if lower.endswith(".jsonl") or lower.endswith(".ndjson"):
+        return pd.read_json(path, lines=True)
+    if lower.endswith(".parquet"):
+        return pd.read_parquet(path)
+    raise ValueError("Only CSV, XLSX, JSON, JSONL, and Parquet files are supported.")
+
+
+def write_table(df: pd.DataFrame, path: str) -> None:
+    lower = path.lower()
+    if lower.endswith(".csv"):
+        df.to_csv(path, index=False)
+        return
+    if lower.endswith(".json"):
+        df.to_json(path, orient="records", force_ascii=False, indent=2)
+        return
+    if lower.endswith(".parquet"):
+        df.to_parquet(path, index=False)
+        return
+    df.to_csv(path, index=False)
+
+
+def _series_profile(series: pd.Series) -> dict:
+    non_null = series.dropna()
+    numeric = pd.to_numeric(non_null, errors="coerce")
+    numeric_ratio = float(numeric.notna().mean()) if len(non_null) else 0.0
+    parsed_dates = pd.to_datetime(non_null, errors="coerce", dayfirst=True, format="mixed")
+    date_ratio = float(parsed_dates.notna().mean()) if len(non_null) else 0.0
+    info = {
+        "name": str(series.name),
+        "dtype": str(series.dtype),
+        "nulls": int(series.isna().sum()),
+        "null_ratio": float(series.isna().mean()) if len(series) else 0.0,
+        "unique": int(series.nunique(dropna=True)),
+        "sample_values": [None if pd.isna(v) else str(v) for v in series.head(8).tolist()],
+        "semantic_type": "text",
+    }
+    if numeric_ratio >= 0.8:
+        info["semantic_type"] = "number"
+        nums = numeric.dropna()
+        if len(nums):
+            q1 = float(nums.quantile(0.25))
+            q3 = float(nums.quantile(0.75))
+            iqr = q3 - q1
+            outliers = nums[(nums < q1 - 1.5 * iqr) | (nums > q3 + 1.5 * iqr)] if iqr else nums.iloc[0:0]
+            info.update(
+                {
+                    "min": float(nums.min()),
+                    "max": float(nums.max()),
+                    "mean": float(nums.mean()),
+                    "outlier_count": int(len(outliers)),
+                }
+            )
+    elif date_ratio >= 0.8:
+        info["semantic_type"] = "date"
+        dates = parsed_dates.dropna()
+        if len(dates):
+            info.update({"min": str(dates.min().date()), "max": str(dates.max().date())})
+    elif info["unique"] <= max(20, int(len(series) * 0.1)):
+        info["semantic_type"] = "category"
+        info["top_values"] = {str(k): int(v) for k, v in non_null.astype(str).value_counts().head(8).items()}
+    return info
+
+
+def representative_sample(df: pd.DataFrame, max_rows: int = 25) -> pd.DataFrame:
+    if len(df) <= max_rows:
+        return df.copy()
+    head_n = max(3, max_rows // 3)
+    tail_n = max(2, max_rows // 5)
+    sample_parts = [df.head(head_n), df.tail(tail_n)]
+    interesting_indexes = set()
+    for col in df.columns:
+        null_rows = df[df[col].isna()].head(2).index
+        interesting_indexes.update(int(i) for i in null_rows)
+        numeric = pd.to_numeric(df[col], errors="coerce")
+        if numeric.notna().sum() >= 5:
+            interesting_indexes.update(int(i) for i in numeric.nlargest(2).index)
+            interesting_indexes.update(int(i) for i in numeric.nsmallest(2).index)
+    if interesting_indexes:
+        sample_parts.append(df.loc[sorted(interesting_indexes)].head(max_rows))
+    sample = pd.concat(sample_parts).drop_duplicates().head(max_rows)
+    return sample.reset_index(drop=True)
 
 
 def dataframe_profile(df: pd.DataFrame, max_rows: int = 10) -> dict:
+    duplicate_rows = int(df.duplicated().sum()) if len(df) else 0
+    columns = [_series_profile(df[col]) for col in df.columns]
+    warnings = []
+    for col in columns:
+        if col["null_ratio"] >= 0.3:
+            warnings.append(f"Column {col['name']} has {col['null_ratio']:.0%} missing values.")
+        if col.get("outlier_count", 0) > 0:
+            warnings.append(f"Column {col['name']} has {col['outlier_count']} possible numeric outliers.")
+    if duplicate_rows:
+        warnings.append(f"Table has {duplicate_rows} duplicate rows.")
     return {
         "rows": int(len(df)),
-        "columns": [
-            {
-                "name": str(col),
-                "dtype": str(df[col].dtype),
-                "nulls": int(df[col].isna().sum()),
-                "sample_values": [None if pd.isna(v) else str(v) for v in df[col].head(5).tolist()],
-            }
-            for col in df.columns
-        ],
-        "sample": df.head(max_rows).to_dict(orient="records"),
+        "columns_count": int(len(df.columns)),
+        "columns": columns,
+        "duplicate_rows": duplicate_rows,
+        "warnings": warnings,
+        "sample": representative_sample(df, max_rows=max_rows).to_dict(orient="records"),
     }
+
+
+def dataframe_analysis(df: pd.DataFrame, max_rows: int = 10) -> dict:
+    profile = dataframe_profile(df, max_rows=max_rows)
+    critical = []
+    for col in profile["columns"]:
+        if col["null_ratio"] >= 0.5:
+            critical.append(f"Column {col['name']} is more than half empty.")
+        if col["semantic_type"] == "number" and col.get("outlier_count", 0) > max(5, int(profile["rows"] * 0.02)):
+            critical.append(f"Column {col['name']} has many possible outliers.")
+    profile["summary"] = {
+        "quality": "needs_attention" if critical else "ok",
+        "critical_findings": critical,
+        "human_readable": (
+            "The table needs attention: " + " ".join(critical)
+            if critical
+            else "The table structure looks usable for transformation."
+        ),
+    }
+    return profile
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [json_safe(v) for v in value]
+    if value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if pd.isna(value) and not isinstance(value, (str, bytes, list, dict, tuple)):
+        return None
+    return value
+
+
+def profile_to_json(profile: dict) -> str:
+    return json.dumps(json_safe(profile), ensure_ascii=False, default=str)
+
+
+def columns_signature(df: pd.DataFrame) -> str:
+    parts = [f"{col}:{df[col].dtype}" for col in df.columns]
+    return "|".join(parts)
+
+
+def file_extension(path: str) -> str:
+    return pathlib.Path(path).suffix.lower()

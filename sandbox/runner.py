@@ -3,6 +3,7 @@ import os
 import pathlib
 import traceback
 import importlib.util
+import numpy as np
 import pandas as pd
 
 WORKDIR = pathlib.Path(os.environ.get("SANDBOX_WORKDIR", "/work"))
@@ -30,6 +31,7 @@ try:
     spec = importlib.util.spec_from_file_location("candidate", CODE_FILE)
     module = importlib.util.module_from_spec(spec)
     module.pd = pd
+    module.np = np
     spec.loader.exec_module(module)
 
     if not hasattr(module, "transform"):
