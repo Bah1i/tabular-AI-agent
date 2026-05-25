@@ -14,7 +14,7 @@ from app.models.memory import TransformationMemory
 from app.models.metric import JobMetric
 from app.services.ala_lens import parameter_model, record_lens_event, source_model, view_model
 from app.services.comparator import compare_dataframes_report, infer_rules_from_expected
-from app.services.llm_client import DeepSeekClient, LLMResult
+from app.services.llm_client import LLMResult, get_llm_client
 from app.services.profiler import (
     columns_signature,
     dataframe_profile,
@@ -63,7 +63,7 @@ def _save_metric(
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             estimated_cost_usd=estimated_cost_usd,
-            model_name=settings.deepseek_model,
+            model_name=settings.effective_llm_model,
         )
     )
     db.commit()
@@ -209,7 +209,7 @@ def run_transform_job(db: Session, job: TransformJob) -> TransformJob:
     job.status = JobStatus.running
     job.updated_at = datetime.utcnow()
     db.commit()
-    llm = DeepSeekClient()
+    llm = get_llm_client()
 
     with trace_job(job.id, "tabular-transform-job") as trace:
         try:
