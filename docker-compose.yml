@@ -10,6 +10,18 @@ services:
   redis:
     image: redis:7
     ports: ["6380:6379"]
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+    ports: ["8081:8080"]
+    volumes:
+      - ./infra/keycloak/realm-tabular-agent.json:/opt/keycloak/data/import/realm-tabular-agent.json:ro
+      - keycloak_data:/opt/keycloak/data
   api:
     build: .
     env_file: [.env]
@@ -30,5 +42,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 volumes:
   pg_data:
+  keycloak_data:
   sandbox_runs:
     name: tabular_agent_sandbox_runs

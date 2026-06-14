@@ -15,6 +15,7 @@ class TransformationMemory(Base):
     generated_code: Mapped[str] = mapped_column(Text)
     explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
     profile_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     success: Mapped[bool] = mapped_column(Boolean, default=True)
     uses: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

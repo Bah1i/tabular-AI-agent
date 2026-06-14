@@ -2,8 +2,8 @@ from app.core.config import settings
 from app.services.profiler import read_table
 
 
-def table_preview(path: str, limit: int | None = None) -> dict:
-    df = read_table(path)
+def table_preview(path: str, limit: int | None = None, headerless: bool = False) -> dict:
+    df = read_table(path, headerless=headerless)
     rows_limit = limit or settings.preview_rows
     sample = df.head(rows_limit)
     return {

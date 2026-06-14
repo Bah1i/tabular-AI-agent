@@ -1,6 +1,7 @@
 import math
 import json
 import re
+import warnings
 import pandas as pd
 
 
@@ -16,8 +17,10 @@ class ComparisonReport:
 
 def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     x = df.copy(); x.columns = [str(c) for c in x.columns]; return x.reset_index(drop=True)
-def _values_equal(actual, expected, numeric_tol: float, date_tolerant: bool) -> bool:
+def _values_equal(actual, expected, numeric_tol: float, date_tolerant: bool, exact_strings: bool = False) -> bool:
     if pd.isna(actual) and pd.isna(expected): return True
+    if exact_strings:
+        return str(actual).strip() == str(expected).strip()
     a_num = pd.to_numeric(pd.Series([actual]), errors='coerce').iloc[0]
     e_num = pd.to_numeric(pd.Series([expected]), errors='coerce').iloc[0]
     if not pd.isna(a_num) and not pd.isna(e_num):
@@ -36,6 +39,12 @@ def _parse_date(value):
     return pd.to_datetime(text, errors="coerce", dayfirst=True)
 
 
+def _display_value(value) -> str:
+    if pd.isna(value):
+        return "<missing>"
+    return str(value)
+
+
 def infer_rules_from_expected(expected: pd.DataFrame) -> dict:
     rules = {"required_columns": [str(c) for c in expected.columns], "columns": {}}
     for col in expected.columns:
@@ -51,7 +60,9 @@ def infer_rules_from_expected(expected: pd.DataFrame) -> dict:
                 col_rules["min"] = float(nums.min())
                 col_rules["max"] = float(nums.max())
         else:
-            dates = pd.to_datetime(s.dropna(), errors="coerce", dayfirst=True)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                dates = pd.to_datetime(s.dropna(), errors="coerce", dayfirst=True)
             if len(dates) and dates.notna().mean() >= 0.8:
                 col_rules["type"] = "date"
             else:
@@ -80,9 +91,10 @@ def validate_business_rules(df: pd.DataFrame, rules: dict | None) -> list[dict]:
             bad = int(nums.isna().sum())
             if bad:
                 violations.append({"rule": "number_type", "column": col, "count": bad})
-            if "min" in col_rules and (nums < col_rules["min"]).any():
+            tolerance = 1e-9
+            if "min" in col_rules and (nums < (col_rules["min"] - tolerance)).any():
                 violations.append({"rule": "min_range", "column": col, "min": col_rules["min"]})
-            if "max" in col_rules and (nums > col_rules["max"]).any():
+            if "max" in col_rules and (nums > (col_rules["max"] + tolerance)).any():
                 violations.append({"rule": "max_range", "column": col, "max": col_rules["max"]})
         if col_rules.get("type") == "date":
             dates = pd.to_datetime(s.dropna(), errors="coerce", dayfirst=True)
@@ -92,7 +104,14 @@ def validate_business_rules(df: pd.DataFrame, rules: dict | None) -> list[dict]:
     return violations
 
 
-def compare_dataframes_report(actual: pd.DataFrame, expected: pd.DataFrame, numeric_tol: float = 1e-6, date_tolerant: bool = True, business_rules: dict | None = None) -> ComparisonReport:
+def compare_dataframes_report(
+    actual: pd.DataFrame,
+    expected: pd.DataFrame,
+    numeric_tol: float = 1e-6,
+    date_tolerant: bool = True,
+    business_rules: dict | None = None,
+    exact_strings: bool = False,
+) -> ComparisonReport:
     a = normalize_df(actual); e = normalize_df(expected)
     details = {"column_diffs": [], "row_count": {}, "value_diffs": [], "rule_violations": []}
     if list(a.columns) != list(e.columns):
@@ -104,12 +123,12 @@ def compare_dataframes_report(actual: pd.DataFrame, expected: pd.DataFrame, nume
     diffs = []
     for i in range(len(e)):
         for col in e.columns:
-            if not _values_equal(a.loc[i, col], e.loc[i, col], numeric_tol, date_tolerant):
-                diffs.append({'row': int(i), 'column': col, 'actual': str(a.loc[i,col]), 'expected': str(e.loc[i,col])})
+            if not _values_equal(a.loc[i, col], e.loc[i, col], numeric_tol, date_tolerant, exact_strings=exact_strings):
+                diffs.append({'row': int(i), 'column': col, 'actual': _display_value(a.loc[i,col]), 'expected': _display_value(e.loc[i,col])})
                 if len(diffs) >= 20:
                     details["value_diffs"] = diffs
                     return ComparisonReport(False, f'Value mismatch examples: {diffs}', details)
-    rule_violations = validate_business_rules(a, business_rules or infer_rules_from_expected(e))
+    rule_violations = [] if exact_strings else validate_business_rules(a, business_rules or infer_rules_from_expected(e))
     details["value_diffs"] = diffs
     details["rule_violations"] = rule_violations
     if diffs:

@@ -9,6 +9,15 @@
 <main class="container">
   <header class="page-head">
     <h1>Tabular AI Agent</h1>
+    {% if keycloak_enabled %}
+      <div class="auth-bar">
+        <span>Signed in as <strong>{{ current_user.email or current_user.sub }}</strong></span>
+        <span>Roles: {{ current_user.roles | join(', ') }}</span>
+        <form action="/auth/logout" method="post">
+          <button type="submit">Logout</button>
+        </form>
+      </div>
+    {% endif %}
     <p>Большая исходная таблица, маленький вручную заданный пример результата, безопасная генерация Pandas-кода и проверка на эталоне.</p>
   </header>
 
@@ -83,7 +92,18 @@
 
   <section class="card">
     <h2>Метрики</h2>
-    <a href="/metrics/summary">Открыть JSON-метрики</a>
+    <a class="button" href="/ui/metrics">Открыть dashboard метрик</a>
+    <a href="/metrics/summary">JSON metrics</a>
+  </section>
+
+  <section class="card">
+    <h2>PostgreSQL read-only</h2>
+    <a class="button" href="/ui/postgres">Открыть модуль PostgreSQL</a>
+  </section>
+
+  <section class="card">
+    <h2>Benchmarks</h2>
+    <a class="button" href="/ui/benchmarks">Открыть benchmark runner</a>
   </section>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>

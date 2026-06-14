@@ -11,9 +11,14 @@
   <h1>Задача #{{ job.id }}</h1>
 
   <section class="card status-panel">
-    <p><b>Режим:</b> <span id="mode">{{ job.mode }}</span></p>
-    <p><b>Статус:</b> <span id="status">{{ job.status.value }}</span></p>
-    <p><b>Попыток:</b> <span id="attempts">{{ job.attempts }}</span></p>
+    <div class="metric-grid compact">
+      <div class="metric-card"><span>Режим</span><strong id="mode">{{ job.mode }}</strong></div>
+      <div class="metric-card"><span>Prompt</span><strong>{{ job.prompt_strategy }}</strong></div>
+      <div class="metric-card"><span>Статус</span><strong id="status">{{ job.status.value }}</strong></div>
+      <div class="metric-card"><span>Попытки</span><strong id="attempts">{{ job.attempts }}</strong></div>
+    </div>
+    <p id="benchmark-case-row" class="hidden"><b>Benchmark case:</b> <span id="benchmark-case-status"></span></p>
+    <p id="cache-hit-row" class="{% if not job.cache_hit_from_job_id %}hidden{% endif %}"><b>Cache hit:</b> результат взят из задачи #<span id="cache-hit-from">{{ job.cache_hit_from_job_id or '' }}</span></p>
     <p><b>Файл:</b> {{ job.source_filename }}</p>
     <p id="running-note">Система обновляет статус автоматически.</p>
     <a id="download-link" class="button {% if not job.result_path %}hidden{% endif %}" href="/jobs/{{ job.id }}/result">Скачать результат</a>
@@ -27,18 +32,26 @@
       <button type="button" data-preview="result">Показать result</button>
       <button type="button" id="analysis-btn">Анализ source</button>
     </div>
-    <div id="table-meta"></div>
+    <div id="table-meta" class="muted"></div>
     <div class="table-wrap"><table id="preview-table"></table></div>
-    <pre id="analysis-output"></pre>
+    <details class="json-details">
+      <summary>Показать JSON анализа</summary>
+      <pre id="analysis-output"></pre>
+    </details>
   </section>
 
   <section class="card">
     <h2>Процесс</h2>
     <ol id="attempt-history"></ol>
+    <details class="json-details">
+      <summary>Показать JSON статуса</summary>
+      <pre id="status-json"></pre>
+    </details>
   </section>
 
   <section class="card">
     <h2>Ala-lens события</h2>
+    <p class="muted">Компактная audit trail: как был получен параметр p, где найден delta, чем amended и когда подтверждена stability.</p>
     <div class="button-row">
       <button type="button" id="load-lens-btn">Показать ala-lens</button>
     </div>
@@ -71,6 +84,11 @@ const explanationEl = document.getElementById('explanation');
 const historyEl = document.getElementById('attempt-history');
 const downloadEl = document.getElementById('download-link');
 const runningNote = document.getElementById('running-note');
+const cacheHitRow = document.getElementById('cache-hit-row');
+const cacheHitFrom = document.getElementById('cache-hit-from');
+const benchmarkCaseRow = document.getElementById('benchmark-case-row');
+const benchmarkCaseStatus = document.getElementById('benchmark-case-status');
+const statusJson = document.getElementById('status-json');
 
 function renderHistory(items) {
   historyEl.innerHTML = '';
@@ -85,12 +103,21 @@ async function refreshStatus() {
   const res = await fetch(`/jobs/${jobId}/status`);
   if (!res.ok) return;
   const data = await res.json();
+  statusJson.textContent = JSON.stringify(data, null, 2);
   statusEl.textContent = data.status;
   attemptsEl.textContent = data.attempts;
   errorEl.textContent = data.error_message || '';
   codeEl.textContent = data.generated_code || '';
   explanationEl.textContent = data.explanation || '';
   renderHistory(data.attempt_history);
+  if (data.cache_hit_from_job_id) {
+    cacheHitFrom.textContent = data.cache_hit_from_job_id;
+    cacheHitRow.classList.remove('hidden');
+  }
+  if (data.benchmark_case) {
+    benchmarkCaseStatus.textContent = `${data.benchmark_case.case_name}: ${data.benchmark_case.status}; hidden/generalization success=${data.benchmark_case.success}. ${data.benchmark_case.error_message || ''}`;
+    benchmarkCaseRow.classList.remove('hidden');
+  }
   if (data.result_path) downloadEl.classList.remove('hidden');
   if (data.status === 'success' || data.status === 'failed') {
     runningNote.textContent = 'Выполнение завершено.';
@@ -143,18 +170,410 @@ document.getElementById('analysis-btn').addEventListener('click', async () => {
   document.getElementById('analysis-output').textContent = JSON.stringify(await res.json(), null, 2);
 });
 
+function parseMaybeJson(value) {
+  if (!value) return null;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function eventTitle(type) {
+  const names = {
+    get: 'GET: синтез параметра p',
+    delta: 'DELTA: обнаружено несоответствие',
+    amendment: 'AMENDMENT: исправление параметра p',
+    stability: 'STABILITY: согласованность подтверждена'
+  };
+  return names[type] || type;
+}
+
+function lensValueText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'object') return JSON.stringify(value, null, 2);
+  return String(value);
+}
+
+function isBlankLensValue(value) {
+  const text = lensValueText(value).trim();
+  return !text || text === '-' || text === '—' || text === 'вЂ”' || text === '{}' || text === '[]' || text === 'null';
+}
+
+function renderLensBlock(label, value) {
+  if (isBlankLensValue(value)) return null;
+  const block = document.createElement('div');
+  block.className = 'lens-block';
+  if (label === 'Главное') block.classList.add('lens-summary-block');
+  const h = document.createElement('strong');
+  h.textContent = label;
+  const p = document.createElement('pre');
+  p.textContent = lensValueText(value);
+  block.appendChild(h);
+  block.appendChild(p);
+  return block;
+}
+
+function renderLensSection(title, blocks) {
+  const renderedBlocks = [];
+  blocks.forEach(([label, value]) => {
+    const block = renderLensBlock(label, value);
+    if (block) renderedBlocks.push(block);
+  });
+  if (!renderedBlocks.length) return document.createDocumentFragment();
+  const section = document.createElement('section');
+  section.className = 'lens-section';
+  if (title.startsWith('0.')) section.classList.add('lens-summary-section');
+  const h = document.createElement('h4');
+  h.textContent = title;
+  const grid = document.createElement('div');
+  grid.className = 'lens-grid';
+  renderedBlocks.forEach(block => grid.appendChild(block));
+  section.appendChild(h);
+  section.appendChild(grid);
+  return section;
+}
+
+function appendLensSection(item, title, blocks) {
+  const section = renderLensSection(title, blocks);
+  if (section) item.appendChild(section);
+}
+
+function failureFamilyRu(family) {
+  const names = {
+    column_count_too_low: 'слишком мало колонок в результате',
+    column_count_too_high: 'слишком много колонок в результате',
+    column_order_mismatch: 'порядок колонок не совпал',
+    row_count_too_low: 'слишком мало строк в результате',
+    row_count_too_high: 'слишком много строк в результате',
+    row_count_mismatch: 'количество строк не совпало',
+    value_mismatch: 'значения не совпали',
+    rule_violation: 'нарушены правила проверки',
+    execution_or_static_error: 'ошибка выполнения или статической проверки',
+    unknown: 'тип ошибки не определен'
+  };
+  return names[family] || family || '—';
+}
+
+function renderFailureContextText(context) {
+  if (!context) return '—';
+  const lines = [
+    `Тип ошибки: ${failureFamilyRu(context.error_family)}`,
+    `Reroute нужен: ${context.should_reroute ? 'да' : 'нет'}`,
+  ];
+  if (context.actual_width !== null && context.actual_width !== undefined) {
+    lines.push(`Колонки: actual=${context.actual_width}, expected=${context.expected_width}`);
+  }
+  if (context.actual_height !== null && context.actual_height !== undefined) {
+    lines.push(`Строки: actual=${context.actual_height}, expected=${context.expected_height}`);
+  }
+  if (context.failed_operator) lines.push(`Предыдущий оператор: ${context.failed_operator}`);
+  if (context.repeated_error_count) lines.push(`Повторов ошибки: ${context.repeated_error_count}`);
+  if (context.repeated_code_hash) lines.push('Код повторил уже провалившийся вариант.');
+  if (context.repeated_plan_signature) lines.push('План повторил уже провалившийся вариант.');
+  if (context.operator_suggestions?.length) lines.push(`Кандидаты операторов: ${context.operator_suggestions.join(', ')}`);
+  return lines.join('\n');
+}
+
+function renderCandidateContextText(context) {
+  if (!context || !context.enabled) return '—';
+  return [
+    `Метод: независимые FOOFAH-кандидаты`,
+    `Кандидат: ${context.candidate_index || 1} из ${context.candidate_count || 1}`,
+    context.explanation || 'Каждый кандидат запускается как отдельный структурный вариант; benchmark выбирает первый, прошедший visible и hidden validation.',
+  ].filter(Boolean).join('\n');
+}
+
+function renderAttemptSummaryText(amendment) {
+  const summary = amendment?.attempt_summary;
+  const context = amendment?.failure_context;
+  const candidateText = renderCandidateContextText(amendment?.candidate_context || summary?.candidate_context);
+  if (!summary) return '—';
+  const path = summary.repair_path || amendment?.repair_path;
+  if (path === 'reroute') {
+    return [
+      `Попытка ${summary.attempt}: включен reroute.`,
+      candidateText !== '—' ? candidateText : '',
+      `Почему: ${renderFailureContextText(context)}`,
+      summary.operator ? `Новый оператор: ${summary.operator}` : '',
+    ].filter(Boolean).join('\n');
+  }
+  if (path === 'repair') {
+    return [
+      `Попытка ${summary.attempt}: обычный repair без смены оператора.`,
+      candidateText !== '—' ? candidateText : '',
+      `Почему: ${context ? `ошибка относится к типу "${failureFamilyRu(context.error_family)}", условия reroute еще не сработали.` : (summary.reason || '—')}`,
+      summary.operator ? `Оператор: ${summary.operator}` : '',
+    ].filter(Boolean).join('\n');
+  }
+  return [summary.summary || JSON.stringify(summary, null, 2), candidateText !== '—' ? candidateText : ''].filter(Boolean).join('\n');
+}
+
+function renderEventSummaryText(event, delta, amendment, plan, candidateContext) {
+  const candidateText = renderCandidateContextText(candidateContext);
+  const candidateLine = candidateText !== '—' ? `\n\n${candidateText}` : '';
+  if (event.type === 'get') {
+    const operator = plan?.router_operator || plan?.operator || 'не указан';
+    return `Попытка ${event.attempt}: первичный синтез параметра p.\nОператор: ${operator}.\nДальше код будет проверен на expected example.${candidateLine}`;
+  }
+  if (event.type === 'delta') {
+    const parts = [`Попытка ${event.attempt}: проверка не прошла.`];
+    if (delta?.column_diffs?.length) {
+      const diff = delta.column_diffs[0];
+      parts.push(`Колонки: actual=${(diff.actual || []).length}, expected=${(diff.expected || []).length}.`);
+    }
+    if (delta?.row_count && Object.keys(delta.row_count).length) {
+      parts.push(`Строки: actual=${delta.row_count.actual}, expected=${delta.row_count.expected}.`);
+    }
+    if (delta?.value_diffs?.length) parts.push(`Несовпадений значений показано: ${delta.value_diffs.length}.`);
+    if (delta?.rule_violations?.length) parts.push(`Нарушений правил: ${delta.rule_violations.length}.`);
+    parts.push('Следующая попытка получит этот delta как основание для repair или reroute.');
+    return `${parts.join('\n')}${candidateLine}`;
+  }
+  if (event.type === 'amendment') {
+    return renderAttemptSummaryText(amendment);
+  }
+  if (event.type === 'stability') {
+    return `Попытка ${event.attempt}: результат совпал с expected example.\nПараметр p считается стабильным для видимой проверки.${candidateLine}`;
+  }
+  return event.note || '—';
+}
+
+function renderRepairDecisionText(amendment) {
+  if (!amendment) return '—';
+  const summary = amendment.attempt_summary || {};
+  const path = amendment.repair_path || summary.repair_path;
+  const reason = amendment.repair_path_reason || summary.reason;
+  const operator = summary.operator;
+  return [
+    path ? `path: ${path}` : '',
+    reason ? `reason: ${reason}` : '',
+    operator ? `operator: ${operator}` : '',
+  ].filter(Boolean).join('\n') || '—';
+}
+
+function modelRows(model) {
+  return model?.rows ?? model?.profile?.rows;
+}
+
+function modelColumns(model) {
+  const columns = model?.columns || model?.profile?.columns || [];
+  return columns.map(col => typeof col === 'string' ? col : (col?.name || String(col)));
+}
+
+function renderModelShapeText(label, model) {
+  const rows = modelRows(model);
+  const columns = modelColumns(model);
+  if (rows === undefined && !columns.length) return `${label}: unavailable`;
+  return `${label}: ${rows ?? 'unknown'} rows x ${columns.length} cols`;
+}
+
+function renderModelContextText(model) {
+  const rows = modelRows(model);
+  const columns = modelColumns(model);
+  if (rows === undefined && !columns.length) return 'вЂ”';
+  return `${rows ?? 'unknown'} строк\n${columns.join(', ')}`;
+}
+
+function isDuplicateLensSummarySection(node) {
+  const title = node.querySelector('h4')?.textContent || '';
+  return title.startsWith('0.') || title.startsWith('1.');
+}
+
+function renderForwardTransformText(event, source, view, parameter, plan) {
+  const operator = plan?.router_operator || plan?.operator;
+  const operations = (plan?.operations || []).join(', ');
+  return [
+    `event: ${event.type}`,
+    source ? renderModelShapeText('source', source) : '',
+    view ? renderModelShapeText('view', view) : '',
+    parameter?.code_hash ? `p: ${parameter.code_hash}` : '',
+    operator ? `operator: ${operator}` : '',
+    operations ? `operations: ${operations}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderBackwardPropagationText(event, delta, amendment) {
+  const failure = amendment?.failure_context;
+  const hasRowCount = delta?.row_count && Object.keys(delta.row_count).length;
+  if (delta?.value_diffs?.length || delta?.rule_violations?.length || hasRowCount || delta?.column_diffs?.length) {
+    return [
+      `delta detected on attempt ${event.attempt}`,
+      delta?.column_diffs?.length ? `column diffs: ${delta.column_diffs.length}` : '',
+      hasRowCount ? `row count: actual=${delta.row_count.actual}, expected=${delta.row_count.expected}` : '',
+      delta?.value_diffs?.length ? `value diffs: ${delta.value_diffs.length}` : '',
+      delta?.rule_violations?.length ? `rule violations: ${delta.rule_violations.length}` : '',
+      'propagation: delta becomes repair/reroute constraints for the next parameter p.',
+    ].filter(Boolean).join('\n');
+  }
+  if (failure) {
+    return [
+      `failure family: ${failure.error_family || 'unknown'}`,
+      `should reroute: ${failure.should_reroute ? 'yes' : 'no'}`,
+      failure.direct_repair_instruction ? `repair constraint: ${failure.direct_repair_instruction}` : '',
+    ].filter(Boolean).join('\n');
+  }
+  return event.type === 'stability' ? 'No backward correction needed; visible consistency is already restored.' : '—';
+}
+
+function renderConsistencyRestorationText(event, amendment) {
+  if (event.type === 'stability') return 'restored: generated view matches expected visible table.';
+  if (event.type === 'delta') return 'pending: consistency is broken; repair/reroute should amend p.';
+  if (event.type === 'amendment') {
+    const path = amendment?.repair_path || amendment?.attempt_summary?.repair_path || 'repair';
+    const reason = amendment?.repair_path_reason || amendment?.attempt_summary?.reason || '';
+    return [
+      `amended via: ${path}`,
+      reason ? `reason: ${reason}` : '',
+      'next step: run forward transform again and compare with expected view.',
+    ].filter(Boolean).join('\n');
+  }
+  if (event.type === 'get') return 'initialized: candidate p is ready for forward validation.';
+  return '—';
+}
+
+function percentText(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return 'n/a';
+  return `${Math.round(Number(value) * 100)}%`;
+}
+
+function renderHybridLensText(metadata) {
+  if (!metadata) return '—';
+  return [
+    `status: ${metadata.status || 'unknown'}`,
+    metadata.operator ? `operator: ${metadata.operator}` : '',
+    metadata.putback_scope ? `putback scope: ${metadata.putback_scope}` : '',
+    `source putback: ${metadata.source_putback_supported ? 'yes' : 'no'}`,
+    `parameter putback: ${metadata.parameter_putback_supported ? 'yes' : 'no'}`,
+    metadata.backward ? `backward: ${metadata.backward}` : '',
+    metadata.consistency_restoration ? `restoration: ${metadata.consistency_restoration}` : '',
+    metadata.reason ? `reason: ${metadata.reason}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderCalibratedConfidenceText(confidence) {
+  if (!confidence) return '—';
+  return [
+    `score: ${percentText(confidence.score)} (${confidence.label || 'unlabeled'})`,
+    `visible fit: ${percentText(confidence.visible_fit_score)}`,
+    `structural evidence: ${percentText(confidence.structural_evidence_score)}`,
+    `router confidence: ${percentText(confidence.router_confidence)}`,
+    `lens bonus: ${percentText(confidence.lens_bonus)}`,
+    `ambiguity penalty: ${percentText(confidence.ambiguity_penalty)}`,
+    `repair instability penalty: ${percentText(confidence.repair_instability_penalty)}`,
+    confidence.formula ? `formula: ${confidence.formula}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderTypedDeltaText(typedDelta) {
+  if (!typedDelta) return '—';
+  return [
+    `kind: ${typedDelta.kind || 'unknown'}`,
+    typedDelta.raw_error_family ? `raw error family: ${typedDelta.raw_error_family}` : '',
+    typedDelta.confidence !== undefined ? `delta confidence: ${percentText(typedDelta.confidence)}` : '',
+    typedDelta.diff_counts ? `diff counts: ${JSON.stringify(typedDelta.diff_counts)}` : '',
+    typedDelta.atomic_edits?.length ? `atomic edits:\n${JSON.stringify(typedDelta.atomic_edits, null, 2)}` : '',
+    typedDelta.evidence?.length ? `evidence:\n${typedDelta.evidence.join('\n')}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderPutbackPolicyText(policy) {
+  if (!policy) return '—';
+  return [
+    `policy: ${policy.policy_name || 'unknown'}`,
+    `target: ${policy.putback_target || 'unknown'}`,
+    `source mutation allowed: ${policy.source_mutation_allowed ? 'yes' : 'no'}`,
+    policy.amendment_policy ? `amendment policy: ${policy.amendment_policy}` : '',
+    policy.current_operator ? `current operator: ${policy.current_operator}` : '',
+    policy.target_fields?.length ? `target fields: ${policy.target_fields.join(', ')}` : '',
+    policy.direct_repair_instruction ? `direct repair: ${policy.direct_repair_instruction}` : '',
+    policy.operator_suggestions?.length ? `operator suggestions: ${policy.operator_suggestions.join(', ')}` : '',
+    policy.instruction ? `instruction: ${policy.instruction}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderPutbackModeText(mode) {
+  if (!mode) return '—';
+  return [
+    `mode: ${mode.mode || 'unknown'}`,
+    `source mutation: ${mode.source_mutation || 'unknown'}`,
+    `putback target: ${mode.putback_target || 'unknown'}`,
+    `parameter putback supported: ${mode.parameter_putback_supported ? 'yes' : 'no'}`,
+    `source putback supported: ${mode.source_putback_supported ? 'yes' : 'no'}`,
+  ].filter(Boolean).join('\n');
+}
+
+function renderLensLawChecksText(checks) {
+  if (!checks) return '—';
+  return [
+    checks.scope ? `scope: ${checks.scope}` : '',
+    `GetPut_runtime: ${checks.GetPut_runtime || 'unknown'}`,
+    `PutGet_runtime: ${checks.PutGet_runtime || 'unknown'}`,
+    `PutPut_runtime: ${checks.PutPut_runtime || 'unknown'}`,
+    checks.notes?.length ? `notes:\n${checks.notes.join('\n')}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function renderRestorationStateText(restoration) {
+  if (!restoration) return '—';
+  return [
+    `level: ${restoration.level || 'unknown'}`,
+    `source restored: ${restoration.source_restored ? 'yes' : 'no'}`,
+    `parameter restored: ${restoration.parameter_restored ? 'yes' : 'no'}`,
+    `visible view restored: ${restoration.visible_view_restored ? 'yes' : 'no'}`,
+    `hidden generalization restored: ${restoration.hidden_generalization_restored === null || restoration.hidden_generalization_restored === undefined ? 'unknown' : (restoration.hidden_generalization_restored ? 'yes' : 'no')}`,
+    restoration.evidence ? `evidence: ${restoration.evidence}` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function compactLensText(value, maxLines = 3, maxChars = 420) {
+  const text = String(value ?? '').trim();
+  if (!text || text === '-' || text === '—' || text === 'вЂ”') return 'No signal';
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  const compact = lines.slice(0, maxLines).join('\n');
+  const clipped = compact.length > maxChars ? `${compact.slice(0, maxChars - 1)}...` : compact;
+  return lines.length > maxLines ? `${clipped}\n...` : clipped;
+}
+
+function appendCompactLensField(container, label, value) {
+  const field = document.createElement('div');
+  field.className = 'lens-compact-field';
+  const name = document.createElement('span');
+  name.textContent = label;
+  const body = document.createElement('strong');
+  body.textContent = compactLensText(value);
+  field.appendChild(name);
+  field.appendChild(body);
+  container.appendChild(field);
+}
+
+function buildCompactLensSummary(event, delta, amendment, parameter, plan, typedDelta, putbackPolicy, restorationState, candidateContext) {
+  const compact = document.createElement('section');
+  compact.className = 'lens-compact-section';
+  appendCompactLensField(compact, 'What happened', renderEventSummaryText(event, delta, amendment, plan, candidateContext));
+  appendCompactLensField(compact, 'Typed delta', renderTypedDeltaText(typedDelta));
+  appendCompactLensField(compact, 'Putback policy', renderPutbackPolicyText(putbackPolicy));
+  appendCompactLensField(compact, 'Repair decision', renderRepairDecisionText(amendment));
+  appendCompactLensField(compact, 'Confidence', renderCalibratedConfidenceText(parameter?.calibrated_confidence));
+  appendCompactLensField(compact, 'Restoration', renderRestorationStateText(restorationState));
+  return compact;
+}
+
 document.getElementById('load-lens-btn').addEventListener('click', async () => {
   const res = await fetch(`/jobs/${jobId}/ala-lens`);
   const data = await res.json();
   const wrap = document.getElementById('lens-events');
   wrap.innerHTML = '';
 
-  function parseMaybeJson(value) {
-    if (!value) return null;
-    try { return JSON.parse(value); } catch { return value; }
+  const events = data.events || [];
+  if (events.length) {
+    const counts = events.reduce((acc, event) => {
+      acc[event.type || 'event'] = (acc[event.type || 'event'] || 0) + 1;
+      return acc;
+    }, {});
+    const overview = document.createElement('div');
+    overview.className = 'lens-overview';
+    overview.textContent = `Compact ala-lens view: ${events.length} events. ${Object.entries(counts).map(([type, count]) => `${type}: ${count}`).join(', ')}. Technical details are collapsed below each event.`;
+    wrap.appendChild(overview);
   }
 
-  function summarizeEvent(event) {
+  for (const event of events) {
     const source = parseMaybeJson(event.source_model);
     const view = parseMaybeJson(event.view_model);
     const before = parseMaybeJson(event.parameter_before);
@@ -163,31 +582,27 @@ document.getElementById('load-lens-btn').addEventListener('click', async () => {
     const amendment = parseMaybeJson(event.amendment);
     const parameter = after || before || {};
     const plan = parameter.plan || {};
+    const typedDelta = parameter.typed_view_delta || delta?.typed_view_delta;
+    const putbackPolicy = parameter.putback_policy || amendment?.putback_policy;
+    const putbackMode = parameter.putback_mode;
+    const lensLawChecks = parameter.lens_law_checks;
+    const restorationState = parameter.restoration;
+    const candidateContext = parameter.candidate_context || amendment?.candidate_context || amendment?.attempt_summary?.candidate_context;
     const chips = [];
-    if (source?.rows !== undefined) chips.push(`source: ${source.rows} строк, ${(source.columns || []).length} колонок`);
-    if (view?.rows !== undefined) chips.push(`view: ${view.rows} строк, ${(view.columns || []).length} колонок`);
-    if (parameter?.code_hash) chips.push(`p: ${parameter.code_hash}`);
+    if (event.prompt_strategy) chips.push(`prompt: ${event.prompt_strategy}`);
+    if (event.validation_status) chips.push(`status: ${event.validation_status}`);
+    if (modelRows(source) !== undefined) chips.push(`source: ${modelRows(source)} строк, ${modelColumns(source).length} колонок`);
+    if (modelRows(view) !== undefined) chips.push(`view: ${modelRows(view)} строк, ${modelColumns(view).length} колонок`);
+    if (event.code_hash || parameter?.code_hash) chips.push(`p: ${event.code_hash || parameter.code_hash}`);
+    if (parameter?.semantic_signature) chips.push(`sig: ${parameter.semantic_signature}`);
+    if (parameter?.hybrid_lens?.status) chips.push(`lens: ${parameter.hybrid_lens.status}`);
+    if (parameter?.calibrated_confidence?.score !== undefined) chips.push(`conf: ${percentText(parameter.calibrated_confidence.score)}`);
+    if (typedDelta?.kind && typedDelta.kind !== 'none') chips.push(`delta: ${typedDelta.kind}`);
+    if (putbackMode?.mode) chips.push(`putback: ${putbackMode.mode}`);
+    if (restorationState?.level) chips.push(`restore: ${restorationState.level}`);
     if (delta?.value_diffs?.length) chips.push(`diff: ${delta.value_diffs.length}`);
     if (delta?.rule_violations?.length) chips.push(`rules: ${delta.rule_violations.length}`);
 
-    const ops = plan.operations || [];
-    const selected = plan.selected_columns || [];
-    const params = plan.parameters || {};
-    return {source, view, before, after, delta, amendment, parameter, plan, chips, ops, selected, params};
-  }
-
-  function eventTitle(type) {
-    const names = {
-      get: 'GET: синтез параметра p',
-      delta: 'DELTA: обнаружено несоответствие',
-      amendment: 'AMENDMENT: исправление параметра p',
-      stability: 'STABILITY: согласованность подтверждена'
-    };
-    return names[type] || type;
-  }
-
-  for (const event of data.events || []) {
-    const summaryData = summarizeEvent(event);
     const item = document.createElement('article');
     item.className = `lens-event lens-${event.type}`;
     const header = document.createElement('div');
@@ -200,48 +615,112 @@ document.getElementById('load-lens-btn').addEventListener('click', async () => {
     header.appendChild(note);
     item.appendChild(header);
 
-    const chips = document.createElement('div');
-    chips.className = 'lens-chips';
-    summaryData.chips.forEach(text => {
+    const chipWrap = document.createElement('div');
+    chipWrap.className = 'lens-chips';
+    chips.forEach(text => {
       const chip = document.createElement('span');
       chip.textContent = text;
-      chips.appendChild(chip);
+      chipWrap.appendChild(chip);
     });
-    item.appendChild(chips);
+    item.appendChild(chipWrap);
+    item.appendChild(buildCompactLensSummary(event, delta, amendment, parameter, plan, typedDelta, putbackPolicy, restorationState, candidateContext));
 
-    const grid = document.createElement('div');
-    grid.className = 'lens-grid';
-    const blocks = [
-      ['Source model', summaryData.source ? `${summaryData.source.rows} строк\n${(summaryData.source.columns || []).join(', ')}` : '—'],
-      ['View model', summaryData.view ? `${summaryData.view.rows} строк\n${(summaryData.view.columns || []).join(', ')}` : '—'],
-      ['Operations', summaryData.ops.length ? summaryData.ops.join('\n') : '—'],
-      ['Selected columns', summaryData.selected.length ? summaryData.selected.join(', ') : '—'],
-      ['Parameters', Object.keys(summaryData.params).length ? JSON.stringify(summaryData.params, null, 2) : '—'],
-      ['Delta', summaryData.delta ? JSON.stringify(summaryData.delta, null, 2) : '—'],
-      ['Amendment', summaryData.amendment ? JSON.stringify(summaryData.amendment, null, 2) : '—']
-    ];
-    blocks.forEach(([label, value]) => {
-      const block = document.createElement('div');
-      block.className = 'lens-block';
-      const h = document.createElement('strong');
-      h.textContent = label;
-      const p = document.createElement('pre');
-      p.textContent = value;
-      block.appendChild(h);
-      block.appendChild(p);
-      grid.appendChild(block);
-    });
-    item.appendChild(grid);
+    appendLensSection(item, '0. Lens cycle', [
+      ['Forward transform', renderForwardTransformText(event, source, view, parameter, plan)],
+      ['Delta discovery', renderTypedDeltaText(typedDelta)],
+      ['Backward propagation', renderBackwardPropagationText(event, delta, amendment)],
+      ['Putback target', renderPutbackPolicyText(putbackPolicy)],
+      ['Putback mode', renderPutbackModeText(putbackMode)],
+      ['Amendment policy', putbackPolicy ? `${putbackPolicy.amendment_policy || 'unknown'} via ${putbackPolicy.policy_name || 'unknown'}` : '—'],
+      ['Runtime law checks', renderLensLawChecksText(lensLawChecks)],
+      ['Consistency restoration', renderConsistencyRestorationText(event, amendment)],
+      ['Restoration level', renderRestorationStateText(restorationState)],
+    ]);
+
+    appendLensSection(item, '0. Summary signals', [
+      ['Hybrid lens-backed status', renderHybridLensText(parameter?.hybrid_lens)],
+      ['Calibrated confidence', renderCalibratedConfidenceText(parameter?.calibrated_confidence)],
+      ['Typed view delta', renderTypedDeltaText(typedDelta)],
+      ['Putback policy', renderPutbackPolicyText(putbackPolicy)],
+      ['Putback mode', renderPutbackModeText(putbackMode)],
+      ['Runtime law checks', renderLensLawChecksText(lensLawChecks)],
+      ['Restoration state', renderRestorationStateText(restorationState)],
+      ['Repair decision', renderRepairDecisionText(amendment)],
+      ['Failure context', renderFailureContextText(amendment?.failure_context)],
+      ['Candidate mode', renderCandidateContextText(candidateContext)],
+    ]);
+
+    item.appendChild(renderLensSection('0. Кратко', [
+      ['Главное', renderEventSummaryText(event, delta, amendment, plan, candidateContext)],
+    ]));
+
+    item.appendChild(renderLensSection('1. Контекст', [
+      ['Source model', source ? `${source.rows} строк\n${(source.columns || []).join(', ')}` : '—'],
+      ['View model', view ? `${view.rows} строк\n${(view.columns || []).join(', ')}` : '—'],
+      ['Prompt strategy', event.prompt_strategy || '—'],
+      ['Validation status', event.validation_status || '—'],
+      ['Candidate mode', renderCandidateContextText(candidateContext)],
+    ]));
+
+    item.appendChild(renderLensSection('2. Параметр p', [
+      ['Code hash', event.code_hash || parameter.code_hash || '—'],
+      ['Operations', (plan.operations || []).length ? plan.operations.join('\n') : '—'],
+      ['Selected columns', (plan.selected_columns || []).length ? plan.selected_columns.join(', ') : '—'],
+      ['Parameters', Object.keys(plan.parameters || {}).length ? JSON.stringify(plan.parameters, null, 2) : '—'],
+      ['Shadow AST', parameter.p_ast_shadow ? JSON.stringify(parameter.p_ast_shadow, null, 2) : '—'],
+      ['Semantic signature', parameter.semantic_signature || '—'],
+      ['Hybrid lens', renderHybridLensText(parameter?.hybrid_lens)],
+      ['Calibrated confidence', renderCalibratedConfidenceText(parameter?.calibrated_confidence)],
+      ['Explanation', parameter.explanation || '—'],
+    ]));
+
+    item.appendChild(renderLensSection('3. Проверка', [
+      ['Delta', delta ? JSON.stringify(delta, null, 2) : '—'],
+      ['Typed delta', renderTypedDeltaText(typedDelta)],
+      ['Value diffs', delta?.value_diffs?.length ? JSON.stringify(delta.value_diffs, null, 2) : '—'],
+      ['Rule violations', delta?.rule_violations?.length ? JSON.stringify(delta.rule_violations, null, 2) : '—'],
+      ['Row count', delta?.row_count && Object.keys(delta.row_count).length ? JSON.stringify(delta.row_count, null, 2) : '—'],
+    ]));
+
+    item.appendChild(renderLensSection('4. Исправление', [
+      ['Attempt summary', renderAttemptSummaryText(amendment)],
+      ['Repair path', amendment?.repair_path || amendment?.attempt_summary?.repair_path || '—'],
+      ['Repair path reason', amendment?.repair_path_reason || amendment?.attempt_summary?.reason || '—'],
+      ['Putback policy', renderPutbackPolicyText(putbackPolicy)],
+      ['Putback mode', renderPutbackModeText(putbackMode)],
+      ['Runtime law checks', renderLensLawChecksText(lensLawChecks)],
+      ['Restoration state', renderRestorationStateText(restorationState)],
+      ['Candidate context', renderCandidateContextText(candidateContext)],
+      ['Failure context', renderFailureContextText(amendment?.failure_context)],
+      ['Amendment', amendment ? JSON.stringify(amendment, null, 2) : '—'],
+      ['Repair reason', amendment?.repair_prompt_error || '—'],
+      ['Attempt history', amendment?.attempt_history?.length ? JSON.stringify(amendment.attempt_history, null, 2) : '—'],
+      ['Parameter before', before ? JSON.stringify({code_hash: before.code_hash, plan: before.plan || {}}, null, 2) : '—'],
+    ]));
 
     const details = document.createElement('details');
-    details.className = 'lens-json';
+    details.className = 'json-details';
     const summary = document.createElement('summary');
-    summary.textContent = 'Полный JSON';
+    summary.textContent = 'Показать полный JSON';
     const pre = document.createElement('pre');
     pre.textContent = JSON.stringify(event, null, 2);
     details.appendChild(summary);
     details.appendChild(pre);
     item.appendChild(details);
+
+    const technical = document.createElement('details');
+    technical.className = 'lens-technical-details';
+    const technicalSummary = document.createElement('summary');
+    technicalSummary.textContent = 'Technical details';
+    technical.appendChild(technicalSummary);
+    item.querySelectorAll('.lens-section, .json-details').forEach(node => {
+      if (node.classList.contains('lens-section') && isDuplicateLensSummarySection(node)) {
+        node.remove();
+        return;
+      }
+      technical.appendChild(node);
+    });
+    item.appendChild(technical);
     wrap.appendChild(item);
   }
   if (!data.events?.length) wrap.textContent = 'Ala-lens события пока не записаны.';

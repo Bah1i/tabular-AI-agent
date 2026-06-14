@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Metrics dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css?v=metrics-2">
+</head>
+<body>
+<main class="container wide-container">
+  <header class="page-head">
+    <a href="/">← Назад</a>
+    <h1>Metrics dashboard</h1>
+    <p>Сводные метрики по всем задачам. Метрики одной задачи смотри на странице job, метрики набора задач — на странице benchmark runner.</p>
+  </header>
+
+  <section class="card">
+    <h2>Сводка</h2>
+    <div id="metrics-status" class="notice">Загружаю /metrics/summary...</div>
+    <div id="metric-grid" class="metric-grid"></div>
+    <details class="json-details">
+      <summary>Показать JSON metrics</summary>
+      <pre id="metrics-json"></pre>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>Token trend by attempt</h2>
+    <div id="token-trend-status" class="notice">Loading /metrics/token-trend...</div>
+    <div id="token-trend-summary" class="metric-grid compact"></div>
+    <svg id="token-trend-chart" class="token-trend-chart" viewBox="0 0 760 260" role="img" aria-label="Token usage by attempt"></svg>
+    <div class="table-wrap"><table id="token-trend-table"></table></div>
+    <details class="json-details">
+      <summary>Show JSON token trend</summary>
+      <pre id="token-trend-json"></pre>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>Error type distribution</h2>
+    <div class="table-wrap"><table id="error-table"></table></div>
+  </section>
+</main>
+
+<script>
+const metricDefinitions = {
+  total_jobs: ['Всего задач', 'Количество записей JobMetric.'],
+  successful_jobs: ['Успешные задачи', 'Задачи, завершившиеся success.'],
+  failed_jobs: ['Ошибки', 'total_jobs - successful_jobs.'],
+  success_rate: ['Success rate', 'successful_jobs / total_jobs.'],
+  first_attempt_success_rate: ['First attempt success', 'Успешные не-cache задачи с attempts=1 / все не-cache задачи.'],
+  repair_success_rate: ['Repair success', 'Успешные задачи после repair / все задачи, где attempts > 1.'],
+  average_attempts: ['Average attempts', 'Среднее число попыток на задачу.'],
+  average_latency_seconds: ['Average latency', 'Среднее время выполнения задачи в секундах.'],
+  p95_latency_seconds: ['P95 latency', '95-й перцентиль latency: длинный хвост медленных задач.'],
+  total_llm_calls: ['LLM calls', 'Суммарное число вызовов LLM.'],
+  total_tokens: ['Total tokens', 'Prompt + completion tokens по всем задачам.'],
+  total_estimated_cost_usd: ['Total cost', 'Оценочная стоимость по тарифам LLM_INPUT/OUTPUT_1K_TOKEN_PRICE_USD.'],
+  cost_per_success: ['Cost per success', 'total_estimated_cost_usd / successful_jobs.'],
+  cache_hit_count: ['Cache hits', 'Сколько задач взяли результат из exact cache.'],
+  cache_hit_rate: ['Cache hit rate', 'cache_hit_count / total_jobs.'],
+  sandbox_timeout_rate: ['Sandbox timeout', 'Доля задач, упавших из-за timeout sandbox.'],
+  validation_failure_rate: ['Validation failure', 'Доля задач, где код выполнился, но результат не совпал с expected.'],
+};
+
+function formatValue(key, value) {
+  if (value === null || value === undefined) return 'нет данных';
+  if (key.includes('rate')) return `${(Number(value) * 100).toFixed(1)}%`;
+  if (key.includes('cost')) return `$${Number(value).toFixed(6)}`;
+  if (key.includes('latency')) return `${Number(value).toFixed(3)}s`;
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(3);
+  return String(value);
+}
+
+function addMetric(grid, key, value) {
+  const [label, help] = metricDefinitions[key] || [key, ''];
+  const card = document.createElement('div');
+  card.className = 'metric-card';
+  const labelRow = document.createElement('span');
+  labelRow.append(document.createTextNode(label));
+  const helpBtn = document.createElement('button');
+  helpBtn.className = 'help-dot';
+  helpBtn.type = 'button';
+  helpBtn.title = help;
+  helpBtn.textContent = '?';
+  labelRow.appendChild(helpBtn);
+  const strong = document.createElement('strong');
+  strong.textContent = formatValue(key, value);
+  card.appendChild(labelRow);
+  card.appendChild(strong);
+  grid.appendChild(card);
+}
+
+function addSmallMetric(grid, label, value, help = '') {
+  const card = document.createElement('div');
+  card.className = 'metric-card';
+  const labelRow = document.createElement('span');
+  labelRow.append(document.createTextNode(label));
+  if (help) {
+    const helpBtn = document.createElement('button');
+    helpBtn.className = 'help-dot';
+    helpBtn.type = 'button';
+    helpBtn.title = help;
+    helpBtn.textContent = '?';
+    labelRow.appendChild(helpBtn);
+  }
+  const strong = document.createElement('strong');
+  strong.textContent = value;
+  card.appendChild(labelRow);
+  card.appendChild(strong);
+  grid.appendChild(card);
+}
+
+function renderErrorTable(distribution) {
+  const table = document.getElementById('error-table');
+  table.innerHTML = '<thead><tr><th>Error type</th><th>Count</th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  const entries = Object.entries(distribution || {});
+  if (!entries.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="2">Ошибок пока нет или метрики не записаны.</td>';
+    tbody.appendChild(tr);
+  }
+  entries.forEach(([key, value]) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${key}</td><td>${value}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+}
+
+function renderTokenTrendChart(rows) {
+  const svg = document.getElementById('token-trend-chart');
+  svg.innerHTML = '';
+  const width = 760;
+  const height = 260;
+  const padding = {left: 58, right: 20, top: 22, bottom: 44};
+  if (!rows.length) {
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', width / 2);
+    text.setAttribute('y', height / 2);
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('class', 'chart-empty');
+    text.textContent = 'No token attempt data yet';
+    svg.appendChild(text);
+    return;
+  }
+  const maxValue = Math.max(...rows.map(row => row.average_tokens || 0), 1);
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const barGap = 12;
+  const barWidth = Math.max(18, (plotWidth - barGap * (rows.length - 1)) / rows.length);
+
+  const axis = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  axis.setAttribute('d', `M${padding.left},${padding.top} V${height - padding.bottom} H${width - padding.right}`);
+  axis.setAttribute('class', 'chart-axis');
+  svg.appendChild(axis);
+
+  rows.forEach((row, index) => {
+    const x = padding.left + index * (barWidth + barGap);
+    const value = row.average_tokens || 0;
+    const barHeight = (value / maxValue) * plotHeight;
+    const y = height - padding.bottom - barHeight;
+    const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect.setAttribute('x', x);
+    rect.setAttribute('y', y);
+    rect.setAttribute('width', barWidth);
+    rect.setAttribute('height', barHeight);
+    rect.setAttribute('rx', '4');
+    rect.setAttribute('class', 'chart-bar');
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    title.textContent = `Attempt ${row.attempt_number}: ${Math.round(value)} avg tokens`;
+    rect.appendChild(title);
+    svg.appendChild(rect);
+
+    const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    label.setAttribute('x', x + barWidth / 2);
+    label.setAttribute('y', height - 18);
+    label.setAttribute('text-anchor', 'middle');
+    label.setAttribute('class', 'chart-label');
+    label.textContent = row.attempt_number;
+    svg.appendChild(label);
+
+    const valueLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    valueLabel.setAttribute('x', x + barWidth / 2);
+    valueLabel.setAttribute('y', Math.max(14, y - 6));
+    valueLabel.setAttribute('text-anchor', 'middle');
+    valueLabel.setAttribute('class', 'chart-value');
+    valueLabel.textContent = Math.round(value);
+    svg.appendChild(valueLabel);
+  });
+
+  const yLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  yLabel.setAttribute('x', 10);
+  yLabel.setAttribute('y', 18);
+  yLabel.setAttribute('class', 'chart-label');
+  yLabel.textContent = 'avg tokens';
+  svg.appendChild(yLabel);
+}
+
+function renderTokenTrendTable(rows) {
+  const table = document.getElementById('token-trend-table');
+  table.innerHTML = '<thead><tr><th>Attempt</th><th>Count</th><th>Total tokens</th><th>Average tokens</th><th>Cumulative</th><th>Cost</th></tr></thead>';
+  const tbody = document.createElement('tbody');
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="6">No attempt token data yet.</td>';
+    tbody.appendChild(tr);
+  }
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row.attempt_number}</td><td>${row.attempts}</td><td>${row.total_tokens}</td><td>${Number(row.average_tokens || 0).toFixed(1)}</td><td>${row.cumulative_tokens}</td><td>$${Number(row.estimated_cost_usd || 0).toFixed(6)}</td>`;
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+}
+
+function renderTokenTrend(data) {
+  document.getElementById('token-trend-json').textContent = JSON.stringify(data, null, 2);
+  const status = document.getElementById('token-trend-status');
+  status.className = 'notice success';
+  status.textContent = `${data.note || 'Token trend loaded.'} Source: ${data.trend_source || 'unknown'}.`;
+  const grid = document.getElementById('token-trend-summary');
+  grid.innerHTML = '';
+  addSmallMetric(grid, 'Total attempts', data.total_attempts ?? 0, 'Sum of JobMetric.attempts across all jobs.');
+  addSmallMetric(grid, 'Total tokens', data.total_tokens ?? 0, 'Prompt + completion tokens across all jobs.');
+  addSmallMetric(grid, 'Avg / attempt', Number(data.average_tokens_per_attempt || 0).toFixed(1), 'total_tokens / total_attempts.');
+  addSmallMetric(grid, 'Growth first to last', `${(Number(data.average_growth_ratio_first_to_last || 0) * 100).toFixed(1)}%`, 'Average tokens on last recorded attempt compared with first recorded attempt.');
+  renderTokenTrendChart(data.by_attempt_number || []);
+  renderTokenTrendTable(data.by_attempt_number || []);
+}
+
+async function loadMetrics() {
+  const status = document.getElementById('metrics-status');
+  const res = await fetch('/metrics/summary');
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = {detail: await res.text()};
+  }
+  document.getElementById('metrics-json').textContent = JSON.stringify(data, null, 2);
+  if (!res.ok) {
+    status.className = 'notice danger';
+    status.textContent = `Не удалось загрузить /metrics/summary: HTTP ${res.status}. ${data.detail || ''}`;
+    renderErrorTable({});
+    return;
+  }
+  status.className = 'notice success';
+  status.textContent = `Метрики загружены. Всего задач: ${data.total_jobs ?? 0}.`;
+  const grid = document.getElementById('metric-grid');
+  grid.innerHTML = '';
+  Object.keys(metricDefinitions).forEach(key => addMetric(grid, key, data[key]));
+  renderErrorTable(data.error_type_distribution);
+}
+
+async function loadTokenTrend() {
+  const status = document.getElementById('token-trend-status');
+  const res = await fetch('/metrics/token-trend');
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = {detail: await res.text()};
+  }
+  if (!res.ok) {
+    status.className = 'notice danger';
+    status.textContent = `Could not load /metrics/token-trend: HTTP ${res.status}. ${data.detail || ''}`;
+    document.getElementById('token-trend-json').textContent = JSON.stringify(data, null, 2);
+    renderTokenTrendChart([]);
+    renderTokenTrendTable([]);
+    return;
+  }
+  renderTokenTrend(data);
+}
+
+loadMetrics().catch(error => {
+  const status = document.getElementById('metrics-status');
+  status.className = 'notice danger';
+  status.textContent = `Не удалось загрузить метрики: ${error.message}`;
+  document.getElementById('metrics-json').textContent = error.stack || error.message;
+});
+loadTokenTrend().catch(error => {
+  const status = document.getElementById('token-trend-status');
+  status.className = 'notice danger';
+  status.textContent = `Could not load token trend: ${error.message}`;
+  document.getElementById('token-trend-json').textContent = error.stack || error.message;
+});
+</script>
+</body>
+</html>

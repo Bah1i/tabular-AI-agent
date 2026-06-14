@@ -16,6 +16,16 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_host: str = 'https://cloud.langfuse.com'
     langfuse_enabled: bool = False
+    keycloak_enabled: bool = False
+    keycloak_issuer: str | None = None
+    keycloak_browser_issuer: str | None = None
+    keycloak_backchannel_issuer: str | None = None
+    keycloak_client_id: str | None = None
+    keycloak_audience: str | None = None
+    session_secret_key: str = 'dev-session-secret-change-me'
+    session_cookie_name: str = 'tabular_ai_session'
+    session_max_age_seconds: int = 28800
+    session_cookie_secure: bool = False
     upload_dir: str = '/app/storage/uploads'
     result_dir: str = '/app/storage/results'
     sandbox_image: str = 'tabular-agent-sandbox:latest'
@@ -23,11 +33,12 @@ class Settings(BaseSettings):
     sandbox_shared_dir: str = '/sandbox_runs'
     sandbox_timeout_seconds: int = 15
     max_repair_attempts: int = 3
+    foofah_max_repair_attempts: int = 5
     max_prompt_example_rows: int = 25
     preview_rows: int = 100
     large_table_row_threshold: int = 50000
-    llm_input_1k_token_price_usd: float = 0.0
-    llm_output_1k_token_price_usd: float = 0.0
+    llm_input_1k_token_price_usd: float = 0.00027
+    llm_output_1k_token_price_usd: float = 0.00110
     max_total_llm_tokens_per_job: int = 0
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
 

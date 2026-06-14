@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>SQL read-only</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="container wide-container">
+  <header class="page-head">
+    <a href="/">← Назад</a>
+    <h1>SQL read-only</h1>
+    <p>Пароль остается на backend. В LLM отправляется только metadata: схемы, таблицы, колонки, типы, row count estimate и связи. Запрос выполняется как SELECT/WITH SELECT внутри read-only transaction.</p>
+  </header>
+
+  <section class="two-column-layout">
+    <aside class="card sticky-panel">
+      <h2>1. Подключение</h2>
+      <form id="connect-form">
+        <label>Host<input name="host" value="db" required autocomplete="off"></label>
+        <label>Port<input name="port" type="number" value="5432" required></label>
+        <label>Username<input name="username" value="postgres" required autocomplete="username"></label>
+        <label>Password<input id="password-input" name="password" type="password" required autocomplete="current-password"></label>
+        <button type="submit">Получить базы</button>
+      </form>
+      <p id="connect-status" class="muted"></p>
+
+      <h2>2. Metadata</h2>
+      <label>Database<select id="database-select"></select></label>
+      <label>Schema<select id="schema-select"></select></label>
+      <label>Table<select id="table-select"><option value="">Все таблицы схемы</option></select></label>
+      <div class="button-row">
+        <button id="load-schemas-btn" type="button">Схемы</button>
+        <button id="load-tables-btn" type="button">Таблицы</button>
+        <button id="load-metadata-btn" type="button">Metadata</button>
+      </div>
+    </aside>
+
+    <section class="main-column">
+      <section class="card">
+        <h2>Схема</h2>
+        <div id="schema-summary" class="schema-summary muted">Подключитесь и загрузите metadata.</div>
+        <details class="json-details">
+          <summary>Показать JSON metadata</summary>
+          <pre id="metadata-output"></pre>
+        </details>
+      </section>
+
+      <section class="card">
+        <h2>Data preview</h2>
+        <div class="preview-grid">
+          <section class="preview-panel">
+            <div class="preview-head">
+              <h3>DB table</h3>
+              <button id="load-db-preview-btn" type="button">Load table</button>
+            </div>
+            <p id="db-preview-meta" class="muted">Select one database table in metadata.</p>
+            <div class="button-row compact-row">
+              <button id="db-preview-prev" type="button">Prev</button>
+              <button id="db-preview-next" type="button">Next</button>
+            </div>
+            <div class="table-wrap table-wrap-wide"><table id="db-preview-table"></table></div>
+          </section>
+          <section class="preview-panel">
+            <div class="preview-head">
+              <h3>Expected</h3>
+              <button id="load-expected-preview-btn" type="button">Load expected</button>
+            </div>
+            <p id="expected-preview-meta" class="muted">Attach expected CSV/XLSX in the query block.</p>
+            <div class="button-row compact-row">
+              <button id="expected-preview-prev" type="button">Prev</button>
+              <button id="expected-preview-next" type="button">Next</button>
+            </div>
+            <div class="table-wrap table-wrap-wide"><table id="expected-preview-table"></table></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>3. Запрос</h2>
+        <label>Natural language query</label>
+        <textarea id="nl-query" rows="3" placeholder="Например: посчитай среднюю latency и cost per success по успешным задачам"></textarea>
+
+        <label>Или ручной SQL SELECT</label>
+        <textarea id="sql-query" rows="5" placeholder="SELECT * FROM job_metrics"></textarea>
+
+        <label>Expected CSV/XLSX для проверки результата (опционально)</label>
+        <p class="muted">Можно оставить оба поля запроса пустыми, если приложен expected-файл. Тогда backend попробует вывести read-only SQL по expected-таблице и schema metadata, до 3 LLM-попыток.</p>
+        <div class="drop-zone" data-target="expected-sql-file">
+          <strong>Перетащите expected сюда</strong>
+          <span>Если файл приложен, backend сравнит первые N строк результата SELECT с expected.</span>
+          <input type="file" id="expected-sql-file" name="expected_file">
+          <small id="expected-sql-file-name"></small>
+        </div>
+
+        <div class="button-row">
+          <button id="run-query-btn" type="button">Выполнить read-only</button>
+          <button id="explain-btn" type="button">Только EXPLAIN</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Результат</h2>
+        <p id="query-status" class="muted">Запрос еще не запускался.</p>
+        <div id="sql-summary" class="metric-grid compact"></div>
+        <div id="validation-summary"></div>
+        <div id="sql-lens-summary"></div>
+        <div id="sql-attempt-summary"></div>
+        <div class="table-wrap table-wrap-wide"><table id="result-table"></table></div>
+        <section class="generated-sql-block">
+          <h3>Generated SQL</h3>
+          <pre id="generated-sql-output">SQL появится после успешной генерации или manual query.</pre>
+        </section>
+        <details class="json-details">
+          <summary>Показать JSON ответа</summary>
+          <pre id="sql-output"></pre>
+        </details>
+      </section>
+    </section>
+  </section>
+</main>
+
+<script>
+let connectionId = null;
+let lastMetadata = null;
+
+const databaseSelect = document.getElementById('database-select');
+const schemaSelect = document.getElementById('schema-select');
+const tableSelect = document.getElementById('table-select');
+const connectStatus = document.getElementById('connect-status');
+const metadataOutput = document.getElementById('metadata-output');
+const schemaSummary = document.getElementById('schema-summary');
+const sqlOutput = document.getElementById('sql-output');
+const sqlSummary = document.getElementById('sql-summary');
+const validationSummary = document.getElementById('validation-summary');
+const sqlLensSummary = document.getElementById('sql-lens-summary');
+const sqlAttemptSummary = document.getElementById('sql-attempt-summary');
+const queryStatus = document.getElementById('query-status');
+const generatedSqlOutput = document.getElementById('generated-sql-output');
+const dbPreviewTable = document.getElementById('db-preview-table');
+const expectedPreviewTable = document.getElementById('expected-preview-table');
+const dbPreviewMeta = document.getElementById('db-preview-meta');
+const expectedPreviewMeta = document.getElementById('expected-preview-meta');
+const PREVIEW_LIMIT = 50;
+let dbPreviewOffset = 0;
+let expectedPreviewOffset = 0;
+
+function fillSelect(select, values, emptyLabel = null) {
+  select.innerHTML = '';
+  if (emptyLabel !== null) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = emptyLabel;
+    select.appendChild(option);
+  }
+  (values || []).forEach(value => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    select.appendChild(option);
+  });
+}
+
+function assertConnection() {
+  if (!connectionId) throw new Error('Сначала подключитесь к PostgreSQL.');
+}
+
+function selectedTable() {
+  return {database: databaseSelect.value, schema: schemaSelect.value, table: tableSelect.value};
+}
+
+function metricCard(label, value, help = '') {
+  const div = document.createElement('div');
+  div.className = 'metric-card';
+  div.innerHTML = `<span>${label}${help ? `<button class="help-dot" title="${help}" type="button">?</button>` : ''}</span><strong>${value}</strong>`;
+  return div;
+}
+
+function renderMetadata(data) {
+  lastMetadata = data;
+  metadataOutput.textContent = JSON.stringify(data, null, 2);
+  schemaSummary.innerHTML = '';
+  const tables = data.tables || [];
+  const fks = data.foreign_keys || [];
+  const meta = document.createElement('div');
+  meta.className = 'metric-grid compact';
+  meta.appendChild(metricCard('Database', data.database || '—'));
+  meta.appendChild(metricCard('Schema', data.schema || '—'));
+  meta.appendChild(metricCard('Tables', tables.length));
+  meta.appendChild(metricCard('Foreign keys', fks.length, 'Связи между таблицами, которые LLM может использовать для JOIN.'));
+  schemaSummary.appendChild(meta);
+
+  const list = document.createElement('div');
+  list.className = 'schema-list';
+  tables.forEach(table => {
+    const item = document.createElement('details');
+    item.open = tables.length <= 3;
+    const summary = document.createElement('summary');
+    summary.textContent = `${table.schema}.${table.table} · rows≈${table.row_count_estimate}`;
+    const tableSchema = table.schema || data.schema || 'public';
+    const tableName = table.table || table.name || 'unknown_table';
+    const rowEstimate = table.row_count_estimate ?? 'n/a';
+    summary.textContent = `${tableSchema}.${tableName} · rows≈${rowEstimate}`;
+    const cols = document.createElement('ul');
+    table.columns.forEach(col => {
+      const li = document.createElement('li');
+      const columnType = col.type || col.data_type || 'unknown';
+      li.textContent = `${col.name}: ${columnType}${col.nullable ? ', nullable' : ', not null'}`;
+      li.textContent = `${col.name}: ${columnType}${col.nullable ? ', nullable' : ', not null'}`;
+      cols.appendChild(li);
+    });
+    item.appendChild(summary);
+    item.appendChild(cols);
+    list.appendChild(item);
+  });
+  if (fks.length) {
+    const fkBlock = document.createElement('div');
+    fkBlock.className = 'fk-list';
+    const title = document.createElement('strong');
+    title.textContent = 'Связи для JOIN';
+    fkBlock.appendChild(title);
+    fks.forEach(fk => {
+      const p = document.createElement('p');
+      p.textContent = `${fk.table_schema}.${fk.table_name}.${fk.column_name} → ${fk.foreign_table_schema}.${fk.foreign_table_name}.${fk.foreign_column_name}`;
+      fkBlock.appendChild(p);
+    });
+    list.appendChild(fkBlock);
+  }
+  schemaSummary.appendChild(list);
+}
+
+function renderPreviewTable(tableEl, payload) {
+  tableEl.innerHTML = '';
+  const rows = payload?.rows || [];
+  const columns = payload?.columns || [];
+  if (!columns.length) return;
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  columns.forEach(col => {
+    const th = document.createElement('th');
+    th.textContent = col;
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+  tableEl.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    columns.forEach(col => {
+      const td = document.createElement('td');
+      const value = row[col];
+      td.textContent = value === null || value === undefined ? '' : String(value);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  tableEl.appendChild(tbody);
+}
+
+function previewMetaText(payload, label) {
+  const start = (payload.offset || 0) + 1;
+  const end = (payload.offset || 0) + (payload.row_count || 0);
+  const total = payload.total_rows ?? 'unknown';
+  return `${label}: rows ${payload.row_count ? start : 0}-${end} of ${total}`;
+}
+
+async function loadDbPreview(offset = dbPreviewOffset) {
+  assertConnection();
+  const {database, schema, table} = selectedTable();
+  if (!table) throw new Error('Select one database table before loading DB preview.');
+  dbPreviewOffset = Math.max(0, offset);
+  const url = `/postgres/${connectionId}/table-preview?database=${encodeURIComponent(database)}&schema=${encodeURIComponent(schema)}&table=${encodeURIComponent(table)}&limit=${PREVIEW_LIMIT}&offset=${dbPreviewOffset}`;
+  const payload = await readJsonResponse(await fetch(url));
+  dbPreviewOffset = payload.offset || 0;
+  renderPreviewTable(dbPreviewTable, payload);
+  dbPreviewMeta.textContent = previewMetaText(payload, `${payload.schema}.${payload.table}`);
+}
+
+async function loadExpectedPreview(offset = expectedPreviewOffset) {
+  const file = document.getElementById('expected-sql-file').files[0];
+  if (!file) throw new Error('Attach expected CSV/XLSX before loading expected preview.');
+  expectedPreviewOffset = Math.max(0, offset);
+  const form = new FormData();
+  form.append('expected_file', file);
+  form.append('limit', PREVIEW_LIMIT);
+  form.append('offset', expectedPreviewOffset);
+  const payload = await readJsonResponse(await fetch('/postgres/expected-preview', {method: 'POST', body: form}));
+  expectedPreviewOffset = payload.offset || 0;
+  renderPreviewTable(expectedPreviewTable, payload);
+  expectedPreviewMeta.textContent = previewMetaText(payload, payload.filename || 'expected');
+}
+
+function renderTable(payload) {
+  const table = document.getElementById('result-table');
+  table.innerHTML = '';
+  const rows = payload?.preview?.rows || [];
+  const columns = payload?.preview?.columns || [];
+  sqlSummary.innerHTML = '';
+  sqlSummary.appendChild(metricCard('Rows preview', rows.length, 'Количество строк, возвращенных preview. Backend добавляет LIMIT 1000, если LIMIT отсутствует.'));
+  sqlSummary.appendChild(metricCard('Columns', columns.length));
+  sqlSummary.appendChild(metricCard('Read-only', 'yes', 'Запрос выполняется внутри BEGIN READ ONLY и не может менять данные.'));
+  sqlSummary.appendChild(metricCard('EXPLAIN', payload?.explain?.plan?.length || 0, 'Количество строк плана PostgreSQL EXPLAIN без ANALYZE.'));
+  sqlSummary.appendChild(metricCard('SQL attempts', payload?.attempt_count || payload?.sql_attempts?.length || 1, 'Generated SQL can use up to 3 attempts when an expected file is attached.'));
+  if (!columns.length) return;
+
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  columns.forEach(col => {
+    const th = document.createElement('th');
+    th.textContent = col;
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    columns.forEach(col => {
+      const td = document.createElement('td');
+      const value = row[col];
+      td.textContent = value === null || value === undefined ? '' : String(value);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+}
+
+function renderValidation(validation) {
+  validationSummary.innerHTML = '';
+  if (!validation) {
+    validationSummary.innerHTML = '<p class="muted">Expected файл не приложен, поэтому проверка результата не выполнялась.</p>';
+    return;
+  }
+  const box = document.createElement('div');
+  box.className = validation.ok ? 'notice success' : 'notice';
+  box.innerHTML = `<strong>${validation.ok ? 'Expected совпал' : 'Expected не совпал, но SQL мог выполниться корректно'}</strong><p>${validation.message}</p><p>Сравнено строк: ${validation.compared_rows} из expected ${validation.expected_rows}</p>`;
+  const details = document.createElement('details');
+  details.className = 'json-details';
+  details.innerHTML = `<summary>Показать JSON validation</summary><pre>${JSON.stringify(validation, null, 2)}</pre>`;
+  validationSummary.appendChild(box);
+  validationSummary.appendChild(details);
+}
+
+function renderGeneratedSql(payload) {
+  generatedSqlOutput.textContent = payload?.sql || 'SQL не был сгенерирован.';
+}
+
+function renderSqlLens(payload) {
+  sqlLensSummary.innerHTML = '';
+  const lens = payload?.sql_lens;
+  if (!lens) return;
+  const section = document.createElement('section');
+  section.className = 'sql-lens-card';
+  const forward = lens.forward_transform || {};
+  const delta = lens.delta_discovery || {};
+  const retry = lens.repair_or_retry || {};
+  const restoration = lens.restoration || {};
+  section.innerHTML = `
+    <h3>SQL lens</h3>
+    <div class="lens-compact-section">
+      <div class="lens-compact-field"><span>Forward SELECT</span><strong>${escapeHtml(forward.rows ?? 0)} rows · ${(forward.columns || []).length} cols · ${escapeHtml(forward.source || '')}</strong></div>
+      <div class="lens-compact-field"><span>Expected delta</span><strong>${escapeHtml(delta.kind || 'none')}${delta.message ? '\n' + escapeHtml(delta.message) : ''}</strong></div>
+      <div class="lens-compact-field"><span>Retry policy</span><strong>${escapeHtml(retry.policy || 'no_retry_needed')} · attempts ${escapeHtml(retry.attempts ?? 0)}</strong></div>
+      <div class="lens-compact-field"><span>Restoration</span><strong>${escapeHtml(restoration.read_only_execution || 'unknown')}${restoration.note ? '\n' + escapeHtml(restoration.note) : ''}</strong></div>
+    </div>
+  `;
+  sqlLensSummary.appendChild(section);
+}
+
+function setQueryStatus(payload, isLoading = false) {
+  if (isLoading) {
+    queryStatus.className = 'notice';
+    queryStatus.textContent = 'Запрос в обработке...';
+    return;
+  }
+  const status = payload?.result_status || 'unknown';
+  if (status === 'execution_failed') {
+    queryStatus.className = 'notice danger';
+    queryStatus.textContent = 'SQL не выполнился. Посмотри ошибку и историю попыток ниже.';
+  } else if (status === 'expected_mismatch') {
+    queryStatus.className = 'notice';
+    queryStatus.textContent = 'SQL выполнился, но expected-файл не совпал с результатом живой БД.';
+  } else if (status === 'expected_match') {
+    queryStatus.className = 'notice success';
+    queryStatus.textContent = 'SQL выполнился, expected совпал.';
+  } else {
+    queryStatus.className = 'notice success';
+    queryStatus.textContent = 'SQL выполнился успешно.';
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  }[ch]));
+}
+
+function renderSqlAttempts(attempts) {
+  sqlAttemptSummary.innerHTML = '';
+  if (!attempts || !attempts.length) return;
+  const box = document.createElement('details');
+  box.className = 'json-details';
+  box.open = attempts.length > 1;
+  const rows = attempts.map(item => {
+    const status = item.status || (item.success ? 'success' : 'failed');
+    const message = item.error || item.validation?.message || '';
+    const tokens = item.tokens?.total_tokens || 0;
+    return `<tr><td>${escapeHtml(item.attempt)}</td><td>${escapeHtml(item.source || '')}</td><td>${status}</td><td>${escapeHtml(tokens)}</td><td>${escapeHtml(message)}</td></tr>`;
+  }).join('');
+  box.innerHTML = `
+    <summary>SQL attempt history (${attempts.length})</summary>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Attempt</th><th>Source</th><th>Status</th><th>Tokens</th><th>Message</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <pre>${escapeHtml(JSON.stringify(attempts, null, 2))}</pre>
+  `;
+  sqlAttemptSummary.appendChild(box);
+}
+
+async function readJsonResponse(res) {
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Ошибка запроса.');
+  return data;
+}
+
+async function loadSchemas() {
+  assertConnection();
+  const db = databaseSelect.value;
+  const data = await readJsonResponse(await fetch(`/postgres/${connectionId}/schemas?database=${encodeURIComponent(db)}`));
+  fillSelect(schemaSelect, data.schemas);
+  if (data.schemas?.length) await loadTables();
+}
+
+async function loadTables() {
+  assertConnection();
+  const {database, schema} = selectedTable();
+  const data = await readJsonResponse(await fetch(`/postgres/${connectionId}/tables?database=${encodeURIComponent(database)}&schema=${encodeURIComponent(schema)}`));
+  fillSelect(tableSelect, data.tables, 'Все таблицы схемы');
+}
+
+async function loadMetadata() {
+  assertConnection();
+  const {database, schema, table} = selectedTable();
+  let url = `/postgres/${connectionId}/metadata?database=${encodeURIComponent(database)}&schema=${encodeURIComponent(schema)}`;
+  if (table) url += `&table=${encodeURIComponent(table)}`;
+  const data = await readJsonResponse(await fetch(url));
+  renderMetadata(data);
+  return data;
+}
+
+document.querySelectorAll('.drop-zone').forEach(zone => {
+  const input = document.getElementById(zone.dataset.target);
+  const nameEl = document.getElementById(`${zone.dataset.target}-name`);
+  zone.addEventListener('click', event => { if (event.target.tagName !== 'INPUT') input.click(); });
+  zone.addEventListener('dragover', event => { event.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', event => {
+    event.preventDefault();
+    zone.classList.remove('drag-over');
+    if (event.dataTransfer.files.length) {
+      input.files = event.dataTransfer.files;
+      nameEl.textContent = event.dataTransfer.files[0].name;
+    }
+  });
+  input.addEventListener('change', () => {
+    nameEl.textContent = input.files[0]?.name || '';
+    if (input.id === 'expected-sql-file') {
+      expectedPreviewOffset = 0;
+      expectedPreviewTable.innerHTML = '';
+      expectedPreviewMeta.textContent = input.files[0] ? 'Expected preview is not loaded yet.' : 'Attach expected CSV/XLSX in the query block.';
+    }
+  });
+});
+
+document.getElementById('connect-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  connectStatus.textContent = 'Подключаюсь...';
+  metadataOutput.textContent = '';
+  sqlOutput.textContent = '';
+  try {
+    const data = await readJsonResponse(await fetch('/postgres/connect', {method: 'POST', body: new FormData(event.target)}));
+    connectionId = data.connection_id;
+    document.getElementById('password-input').value = '';
+    fillSelect(databaseSelect, data.databases);
+    connectStatus.textContent = `Подключение готово. Найдено баз: ${(data.databases || []).length}.`;
+    if (data.databases?.length) await loadSchemas();
+  } catch (error) {
+    connectStatus.textContent = error.message;
+  }
+});
+
+document.getElementById('load-schemas-btn').addEventListener('click', async () => {
+  try { await loadSchemas(); } catch (error) { metadataOutput.textContent = error.message; }
+});
+document.getElementById('load-tables-btn').addEventListener('click', async () => {
+  try { await loadTables(); } catch (error) { metadataOutput.textContent = error.message; }
+});
+document.getElementById('load-metadata-btn').addEventListener('click', async () => {
+  try { await loadMetadata(); } catch (error) { metadataOutput.textContent = error.message; }
+});
+databaseSelect.addEventListener('change', async () => {
+  try { await loadSchemas(); } catch (error) { metadataOutput.textContent = error.message; }
+});
+schemaSelect.addEventListener('change', async () => {
+  try { await loadTables(); } catch (error) { metadataOutput.textContent = error.message; }
+});
+tableSelect.addEventListener('change', () => {
+  dbPreviewOffset = 0;
+  dbPreviewTable.innerHTML = '';
+  dbPreviewMeta.textContent = 'DB preview is not loaded yet.';
+});
+
+document.getElementById('load-db-preview-btn').addEventListener('click', async () => {
+  try { await loadDbPreview(0); } catch (error) { dbPreviewMeta.textContent = error.message; }
+});
+document.getElementById('db-preview-prev').addEventListener('click', async () => {
+  try { await loadDbPreview(Math.max(0, dbPreviewOffset - PREVIEW_LIMIT)); } catch (error) { dbPreviewMeta.textContent = error.message; }
+});
+document.getElementById('db-preview-next').addEventListener('click', async () => {
+  try { await loadDbPreview(dbPreviewOffset + PREVIEW_LIMIT); } catch (error) { dbPreviewMeta.textContent = error.message; }
+});
+
+document.getElementById('load-expected-preview-btn').addEventListener('click', async () => {
+  try { await loadExpectedPreview(0); } catch (error) { expectedPreviewMeta.textContent = error.message; }
+});
+document.getElementById('expected-preview-prev').addEventListener('click', async () => {
+  try { await loadExpectedPreview(Math.max(0, expectedPreviewOffset - PREVIEW_LIMIT)); } catch (error) { expectedPreviewMeta.textContent = error.message; }
+});
+document.getElementById('expected-preview-next').addEventListener('click', async () => {
+  try { await loadExpectedPreview(expectedPreviewOffset + PREVIEW_LIMIT); } catch (error) { expectedPreviewMeta.textContent = error.message; }
+});
+
+document.getElementById('run-query-btn').addEventListener('click', async () => {
+  try {
+    assertConnection();
+    setQueryStatus(null, true);
+    sqlOutput.textContent = '';
+    sqlLensSummary.innerHTML = '';
+    sqlAttemptSummary.innerHTML = '';
+    validationSummary.innerHTML = '';
+    generatedSqlOutput.textContent = 'SQL генерируется...';
+    if (!lastMetadata) await loadMetadata();
+    const {database, schema, table} = selectedTable();
+    const form = new FormData();
+    form.append('database', database);
+    form.append('schema', schema);
+    form.append('table', table);
+    form.append('natural_language_query', document.getElementById('nl-query').value);
+    form.append('sql_query', document.getElementById('sql-query').value);
+    const expected = document.getElementById('expected-sql-file').files[0];
+    if (expected) form.append('expected_file', expected);
+    const data = await readJsonResponse(await fetch(`/postgres/${connectionId}/query`, {method: 'POST', body: form}));
+    sqlOutput.textContent = JSON.stringify(data, null, 2);
+    setQueryStatus(data);
+    renderTable(data);
+    renderGeneratedSql(data);
+    renderSqlLens(data);
+    if (data.expected_preview) {
+      renderPreviewTable(expectedPreviewTable, data.expected_preview);
+      expectedPreviewMeta.textContent = previewMetaText(data.expected_preview, data.expected_preview.filename || 'expected');
+    }
+    renderValidation(data.expected_validation);
+    renderSqlAttempts(data.sql_attempts);
+  } catch (error) {
+    queryStatus.className = 'notice danger';
+    queryStatus.textContent = 'SQL запрос завершился ошибкой выполнения.';
+    sqlOutput.textContent = error.message;
+    generatedSqlOutput.textContent = 'SQL не был получен из-за ошибки.';
+  }
+});
+
+document.getElementById('explain-btn').addEventListener('click', async () => {
+  try {
+    assertConnection();
+    const form = new FormData();
+    form.append('database', databaseSelect.value);
+    form.append('sql_query', document.getElementById('sql-query').value);
+    const data = await readJsonResponse(await fetch(`/postgres/${connectionId}/explain`, {method: 'POST', body: form}));
+    sqlOutput.textContent = JSON.stringify(data, null, 2);
+  } catch (error) {
+    sqlOutput.textContent = error.message;
+  }
+});
+</script>
+</body>
+</html>

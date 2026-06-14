@@ -18,10 +18,17 @@ class TransformJob(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.created)
     mode: Mapped[str] = mapped_column(String(32), default="transform")
+    prompt_strategy: Mapped[str] = mapped_column(String(64), default="standard")
 
     source_filename: Mapped[str] = mapped_column(String(255))
     source_path: Mapped[str] = mapped_column(String(1024))
     expected_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    expected_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    instruction_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    model_name: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    cache_hit_from_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     user_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_code: Mapped[str | None] = mapped_column(Text, nullable=True)

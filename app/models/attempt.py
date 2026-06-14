@@ -13,6 +13,7 @@ class TransformAttempt(Base):
     job_id: Mapped[int] = mapped_column(ForeignKey("transform_jobs.id"), index=True)
     attempt_number: Mapped[int] = mapped_column(Integer, default=1)
     phase: Mapped[str] = mapped_column(String(64), default="generation")
+    prompt_strategy: Mapped[str] = mapped_column(String(64), default="standard")
     success: Mapped[bool] = mapped_column(Boolean, default=False)
     generated_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     explanation: Mapped[str | None] = mapped_column(Text, nullable=True)

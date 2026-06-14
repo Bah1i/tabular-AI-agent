@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Benchmarks</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<main class="container wide-container">
+  <header class="page-head">
+    <a href="/">← Назад</a>
+    <h1>Benchmarks</h1>
+    <p>FOOFAH benchmark запускает transform pipeline по парам InputTable.csv → OutputTable.csv. Для FOOFAH дополнительно проверяется TestingTable.csv → TestAnswer.csv, поэтому benchmark success ближе всего к perfect program из статьи Foofah.</p>
+  </header>
+
+  <section class="card">
+    <h2>Запуск</h2>
+    <div class="grid-form">
+      <label>FOOFAH block
+        <select id="case-block">
+          <option value="0">Весь benchmark: 250 cases</option>
+          <option value="1">Block 1: cases 1-25</option>
+          <option value="2">Block 2: cases 26-50</option>
+          <option value="3">Block 3: cases 51-75</option>
+          <option value="4">Block 4: cases 76-100</option>
+          <option value="5">Block 5: cases 101-125</option>
+          <option value="6">Block 6: cases 126-150</option>
+          <option value="7">Block 7: cases 151-175</option>
+          <option value="8">Block 8: cases 176-200</option>
+          <option value="9">Block 9: cases 201-225</option>
+          <option value="10">Block 10: cases 226-250</option>
+        </select>
+      </label>
+      <label>Максимум cases
+        <input id="max-cases" type="number" min="1" max="5000" placeholder="Пусто = выбранный блок целиком">
+      </label>
+      <label>FOOFAH candidates
+        <select id="foofah-candidate-count">
+          <option value="1">Обычный режим: 1 кандидат</option>
+          <option value="2">Дорогой режим: 2 кандидата</option>
+          <option value="3">Пожиратель токенов: 3 кандидата</option>
+        </select>
+      </label>
+    </div>
+    <label class="inline-check" title="Reuse visible-success solutions from the same case family; hidden feedback is still forbidden unless oracle mode is enabled.">
+      <input id="reuse-case-enabled" type="checkbox" autocomplete="off">
+      Переиспользовать уже решенные FOOFAH cases для этой версии промпта
+    </label>
+    <label class="inline-check">
+      <input id="memory-enabled" type="checkbox" checked autocomplete="off">
+      Use TransformationMemory examples
+    </label>
+    <label class="inline-check danger-check">
+      <input id="oracle-mode" type="checkbox" autocomplete="off">
+      Oracle-hidden mode: use TestingTable/TestAnswer feedback (dishonest)
+    </label>
+    <p id="mode-preview" class="muted"></p>
+    <div class="button-row">
+      <button id="run-foofah-btn" type="button">Запустить FOOFAH benchmark</button>
+    </div>
+    <details class="json-details" open>
+      <summary>Показать JSON запуска</summary>
+      <pre id="run-output"></pre>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>Dashboard</h2>
+    <p id="summary-line" class="muted">Выберите run или запустите новый benchmark.</p>
+    <div id="dashboard-grid" class="metric-grid"></div>
+    <details class="json-details">
+      <summary>Показать JSON summary</summary>
+      <pre id="summary-json"></pre>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>Последние runs</h2>
+    <div class="pagination-row">
+      <span>Runs {{ runs_total }} · page {{ runs_page }} / {{ runs_total_pages }} · {{ runs_per_page }} per page</span>
+      <div class="pagination-actions">
+        {% if runs_has_prev %}
+          <a class="button button-secondary" href="/ui/benchmarks?page={{ runs_page - 1 }}">Newer</a>
+        {% else %}
+          <span class="button button-secondary disabled">Newer</span>
+        {% endif %}
+        {% if runs_has_next %}
+          <a class="button button-secondary" href="/ui/benchmarks?page={{ runs_page + 1 }}">Older</a>
+        {% else %}
+          <span class="button button-secondary disabled">Older</span>
+        {% endif %}
+        {% if runs_total_pages > 1 %}
+          <a class="button button-secondary" href="/ui/benchmarks?page={{ runs_total_pages }}">First run page</a>
+        {% endif %}
+      </div>
+    </div>
+    {% if run_rows %}
+      <div class="table-wrap runs-table-wrap"><table class="list-table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Benchmark</th>
+            <th>Mode</th>
+            <th>Candidates</th>
+            <th>Memory</th>
+            <th>Reuse</th>
+            <th>Cache hits</th>
+            <th>Traversal</th>
+            <th>Статус</th>
+            <th>Cases</th>
+            <th>Success jobs</th>
+            <th>Generalization success</th>
+            <th>Benchmark success</th>
+            <th>Fail</th>
+            <th>Latency</th>
+            <th>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for run in run_rows %}
+          <tr class="{% if run.benchmark_mode == 'oracle' %}row-oracle{% elif run.benchmark_mode == 'middle_honest' %}row-middle-honest{% endif %}">
+            <td><button class="link-button" type="button" data-run-id="{{ run.run_id }}">#{{ run.run_id }}</button></td>
+            <td>{{ run.benchmark_label or run.name }}</td>
+            <td>{{ run.mode_label or run.benchmark_mode }}</td>
+            <td>{{ run.candidate_count or 1 }}</td>
+            <td>{% if run.memory_enabled %}on{% else %}off{% endif %}</td>
+            <td>{% if run.reuse_case_enabled %}on{% else %}off{% endif %}</td>
+            <td>{{ run.cache_hit_cases or 0 }}{% if run.cache_hit_rate is not none %} ({{ "%.1f"|format((run.cache_hit_rate or 0) * 100) }}%){% endif %}</td>
+            <td>{{ run.traversal_order or "forward" }}</td>
+            <td>{{ run.status }}</td>
+            <td>{{ run.total_cases }}</td>
+            <td>{{ run.job_successful_cases }}</td>
+            <td>{% if run.name == "FOOFAH" and run.generalization_success_rate is not none %}{{ "%.1f"|format((run.generalization_success_rate or 0) * 100) }}%{% else %}—{% endif %}</td>
+            <td>{{ run.benchmark_successful_cases }}</td>
+            <td>{{ run.failed_cases }}</td>
+            <td>{{ "%.3f"|format(run.total_latency_seconds or 0) }}s</td>
+            <td>${{ "%.6f"|format(run.total_estimated_cost_usd or 0) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      <div class="pagination-row pagination-row-bottom">
+        <span>Page {{ runs_page }} / {{ runs_total_pages }}</span>
+        <div class="pagination-actions">
+          {% if runs_has_prev %}
+            <a class="button button-secondary" href="/ui/benchmarks?page={{ runs_page - 1 }}">Newer</a>
+          {% endif %}
+          {% if runs_has_next %}
+            <a class="button button-secondary" href="/ui/benchmarks?page={{ runs_page + 1 }}">Older</a>
+          {% endif %}
+          {% if runs_total_pages > 1 %}
+            <a class="button button-secondary" href="/ui/benchmarks?page={{ runs_total_pages }}">First run page</a>
+          {% endif %}
+        </div>
+      </div>
+    {% else %}
+      <p>Benchmark runs пока нет.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Cases</h2>
+    <div class="table-wrap table-wrap-wide"><table id="cases-table"></table></div>
+  </section>
+</main>
+
+<script>
+const runOutput = document.getElementById('run-output');
+const summaryJson = document.getElementById('summary-json');
+const casesTable = document.getElementById('cases-table');
+const summaryLine = document.getElementById('summary-line');
+const dashboardGrid = document.getElementById('dashboard-grid');
+const candidateCountInput = document.getElementById('foofah-candidate-count');
+const reuseCaseInput = document.getElementById('reuse-case-enabled');
+const memoryInput = document.getElementById('memory-enabled');
+const oracleInput = document.getElementById('oracle-mode');
+const modePreview = document.getElementById('mode-preview');
+let benchmarkPollTimer = null;
+
+reuseCaseInput.checked = false;
+memoryInput.checked = true;
+oracleInput.checked = false;
+
+function renderModePreview() {
+  const mode = oracleInput.checked
+    ? 'tricky / oracle'
+    : reuseCaseInput.checked
+      ? 'little tricky / middle honest'
+      : 'honest';
+  const traversal = reuseCaseInput.checked || oracleInput.checked ? 'reverse' : 'forward';
+  modePreview.textContent = `Mode: ${mode}. Candidates: ${candidateCountInput.value}. Memory: ${memoryInput.checked ? 'on' : 'off'}. Reuse: ${reuseCaseInput.checked ? 'on' : 'off'}. Traversal: ${traversal}.`;
+}
+
+[candidateCountInput, reuseCaseInput, memoryInput, oracleInput].forEach(input => input.addEventListener('change', renderModePreview));
+renderModePreview();
+
+const helps = {
+  success_rate: 'Benchmark success / total cases. Для FOOFAH это closest-to-perfect-program metric.',
+  example_success_rate: 'Доля задач, где InputTable → OutputTable прошел.',
+  generalization_success_rate: 'Среди example-success задач: сколько прошло hidden TestingTable → TestAnswer.',
+  generalization_failure_rate: 'Среди example-success задач: сколько не прошло hidden.',
+  cost_per_success: 'total_estimated_cost_usd / successful_cases.',
+  p95_latency: '95-й перцентиль latency по cases.',
+  cache_hit_rate: 'Доля задач, взятых из exact cache.',
+};
+
+function pct(v) { return `${Number((v || 0) * 100).toFixed(1)}%`; }
+function money(v) { return `$${Number(v || 0).toFixed(6)}`; }
+function seconds(v) { return `${Number(v || 0).toFixed(3)}s`; }
+
+function metricCard(label, value, helpKey) {
+  const card = document.createElement('div');
+  card.className = 'metric-card';
+  const help = helps[helpKey] || '';
+  card.innerHTML = `<span>${label}${help ? `<button class="help-dot" type="button" title="${help}">?</button>` : ''}</span><strong>${value}</strong>`;
+  return card;
+}
+
+function p95(values) {
+  if (!values.length) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1))];
+}
+
+function renderDashboard(summary) {
+  const cases = summary.cases || [];
+  const success = summary.successful_cases || 0;
+  const cost = summary.total_estimated_cost_usd || 0;
+  const cacheHits = cases.filter(c => c.error_message === 'cache_hit' || c.cache_hit).length;
+  const strategies = {};
+  const errors = {};
+  cases.forEach(c => {
+    strategies[c.prompt_strategy_used || 'unknown'] = (strategies[c.prompt_strategy_used || 'unknown'] || 0) + 1;
+    if (c.error_message) errors[(c.error_message || '').split(':')[0].slice(0, 80)] = (errors[(c.error_message || '').split(':')[0].slice(0, 80)] || 0) + 1;
+  });
+  dashboardGrid.innerHTML = '';
+  dashboardGrid.appendChild(metricCard('Benchmark success', `${success}/${summary.total_cases} (${pct(summary.success_rate)})`, 'success_rate'));
+  dashboardGrid.appendChild(metricCard('Example success', `${summary.example_successful_cases || 0}/${summary.total_cases} (${pct(summary.example_success_rate)})`, 'example_success_rate'));
+  dashboardGrid.appendChild(metricCard('Generalization success', pct(summary.generalization_success_rate), 'generalization_success_rate'));
+  dashboardGrid.appendChild(metricCard('Generalization fail', pct(summary.generalization_failure_rate), 'generalization_failure_rate'));
+  dashboardGrid.appendChild(metricCard('Cost per success', money(success ? cost / success : 0), 'cost_per_success'));
+  dashboardGrid.appendChild(metricCard('P95 latency', seconds(p95(cases.map(c => c.latency_seconds || 0))), 'p95_latency'));
+  dashboardGrid.appendChild(metricCard('Avg attempts', cases.length ? (cases.reduce((s, c) => s + (c.attempts || 0), 0) / cases.length).toFixed(2) : '0'));
+  dashboardGrid.appendChild(metricCard('Cache hit rate', pct(cases.length ? cacheHits / cases.length : 0), 'cache_hit_rate'));
+  dashboardGrid.appendChild(metricCard('Prompt strategies', Object.entries(strategies).map(([k, v]) => `${k}:${v}`).join(', ') || '—'));
+  dashboardGrid.appendChild(metricCard('Error types', Object.entries(errors).slice(0, 3).map(([k, v]) => `${k}:${v}`).join(', ') || '—'));
+}
+
+function renderCases(summary) {
+  summaryJson.textContent = JSON.stringify(summary, null, 2);
+  renderDashboard(summary);
+  summaryLine.textContent = `Run #${summary.run_id}: ${summary.status}. Benchmark success ${summary.successful_cases}/${summary.total_cases}. Example success ${summary.example_successful_cases || 0}/${summary.total_cases}. Generalization success ${Number((summary.generalization_success_rate || 0) * 100).toFixed(1)}%. Cost ${money(summary.total_estimated_cost_usd)}.`;
+  casesTable.innerHTML = '';
+  const columns = ['case_name', 'dataset_name', 'status', 'job_status', 'example_success', 'generalization_success', 'benchmark_success', 'attempts', 'prompt_strategy_used', 'fallback_used', 'cache_hit', 'latency_seconds', 'token_cost_usd', 'total_tokens', 'job_id', 'error_message'];
+  const thead = document.createElement('thead');
+  const hr = document.createElement('tr');
+  columns.forEach(col => {
+    const th = document.createElement('th');
+    th.textContent = col;
+    hr.appendChild(th);
+  });
+  thead.appendChild(hr);
+  casesTable.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  (summary.cases || []).forEach(item => {
+    const tr = document.createElement('tr');
+    tr.className = item.benchmark_success ? 'row-success' : 'row-failed';
+    columns.forEach(col => {
+      const td = document.createElement('td');
+      if (col === 'job_id' && item.job_id) {
+        const link = document.createElement('a');
+        link.href = `/ui/jobs/${item.job_id}`;
+        link.textContent = `#${item.job_id}`;
+        td.appendChild(link);
+      } else if (col === 'latency_seconds') {
+        td.textContent = Number(item[col] || 0).toFixed(3);
+      } else if (col === 'token_cost_usd') {
+        td.textContent = money(item[col]);
+      } else {
+        td.textContent = item[col] ?? '';
+      }
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  casesTable.appendChild(tbody);
+}
+
+async function readJson(res) {
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || 'Benchmark request failed.');
+  return data;
+}
+
+document.getElementById('run-foofah-btn').addEventListener('click', async () => {
+  runOutput.textContent = 'Benchmark starting...';
+  const form = new FormData();
+  const maxCases = document.getElementById('max-cases').value;
+  if (maxCases) form.append('max_cases', maxCases);
+  form.append('case_block', document.getElementById('case-block').value);
+  form.append('candidate_count', candidateCountInput.value);
+  form.append('reuse_case_enabled', reuseCaseInput.checked ? 'true' : 'false');
+  form.append('memory_enabled', memoryInput.checked ? 'true' : 'false');
+  form.append('oracle_mode', oracleInput.checked ? 'true' : 'false');
+  try {
+    const started = await readJson(await fetch('/benchmarks/foofah/start', {method: 'POST', body: form}));
+    runOutput.textContent = JSON.stringify(started, null, 2);
+    startPolling(started.run_id);
+  } catch (error) {
+    runOutput.textContent = error.message;
+  }
+});
+
+function startPolling(runId) {
+  if (benchmarkPollTimer) clearInterval(benchmarkPollTimer);
+  async function poll() {
+    const summary = await readJson(await fetch(`/benchmarks/${runId}/summary`));
+    runOutput.textContent = JSON.stringify({
+      run_id: summary.run_id,
+      status: summary.status,
+      benchmark_label: summary.benchmark_label,
+      benchmark_mode: summary.benchmark_mode,
+      mode_label: summary.mode_label,
+      memory_enabled: summary.memory_enabled,
+      reuse_case_enabled: summary.reuse_case_enabled,
+      traversal_order: summary.traversal_order,
+      candidate_count: summary.candidate_count,
+      total_cases: summary.total_cases,
+      example_successful_cases: summary.example_successful_cases,
+      successful_cases: summary.successful_cases,
+      generalization_success_rate: summary.generalization_success_rate,
+      failed_cases: summary.failed_cases,
+      total_estimated_cost_usd: summary.total_estimated_cost_usd,
+      quality_metrics: summary.quality_metrics,
+    }, null, 2);
+    renderCases(summary);
+    if (summary.status === 'success' || summary.status === 'failed') {
+      clearInterval(benchmarkPollTimer);
+      benchmarkPollTimer = null;
+    }
+  }
+  poll().catch(error => runOutput.textContent = error.message);
+  benchmarkPollTimer = setInterval(() => poll().catch(error => runOutput.textContent = error.message), 3000);
+}
+
+document.querySelectorAll('[data-run-id]').forEach(button => {
+  button.addEventListener('click', async () => {
+    try { renderCases(await readJson(await fetch(`/benchmarks/${button.dataset.runId}/summary`))); }
+    catch (error) { summaryLine.textContent = error.message; }
+  });
+});
+</script>
+</body>
+</html>

@@ -7,6 +7,7 @@ class JobMetric(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     job_id: Mapped[int] = mapped_column(ForeignKey('transform_jobs.id'), index=True)
     success: Mapped[bool] = mapped_column(Boolean, default=False)
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     latency_seconds: Mapped[float] = mapped_column(Float, default=0.0)
     rows_processed: Mapped[int] = mapped_column(Integer, default=0)

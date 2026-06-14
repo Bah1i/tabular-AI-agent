@@ -37,7 +37,11 @@ try:
     if not hasattr(module, "transform"):
         raise RuntimeError("Generated code must define function transform(df).")
 
-    df = pd.read_csv(INPUT_CSV)
+    string_mode = os.environ.get("SANDBOX_STRING_MODE", "").lower() in {"1", "true", "yes"}
+    read_kwargs = {}
+    if string_mode:
+        read_kwargs.update({"dtype": str, "keep_default_na": False})
+    df = pd.read_csv(INPUT_CSV, **read_kwargs)
     result = module.transform(df)
 
     if not isinstance(result, pd.DataFrame):

@@ -11,7 +11,7 @@ class SandboxExecutionError(RuntimeError):
     pass
 
 
-def execute_code_in_sandbox(code: str, input_df: pd.DataFrame) -> pd.DataFrame:
+def execute_code_in_sandbox(code: str, input_df: pd.DataFrame, string_mode: bool = False) -> pd.DataFrame:
     run_id = uuid.uuid4().hex
     workdir = pathlib.Path(settings.sandbox_shared_dir) / run_id
     container_workdir = f"{settings.sandbox_shared_dir}/{run_id}"
@@ -33,6 +33,7 @@ def execute_code_in_sandbox(code: str, input_df: pd.DataFrame) -> pd.DataFrame:
             "--cpus", "1",
             "--pids-limit", "128",
             "-e", f"SANDBOX_WORKDIR={container_workdir}",
+            "-e", f"SANDBOX_STRING_MODE={'true' if string_mode else 'false'}",
             "-v", f"{settings.sandbox_shared_volume}:{settings.sandbox_shared_dir}:rw",
             settings.sandbox_image,
         ]
@@ -62,6 +63,12 @@ def execute_code_in_sandbox(code: str, input_df: pd.DataFrame) -> pd.DataFrame:
         if not output_path.exists():
             raise SandboxExecutionError("Output file was not created.")
 
-        return pd.read_csv(output_path)
+        try:
+            read_kwargs = {}
+            if string_mode:
+                read_kwargs.update({"dtype": str, "keep_default_na": False})
+            return pd.read_csv(output_path, **read_kwargs)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

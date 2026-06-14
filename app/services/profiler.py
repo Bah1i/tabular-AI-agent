@@ -5,18 +5,31 @@ import pathlib
 import pandas as pd
 
 
-def read_table(path: str) -> pd.DataFrame:
+def _make_positional_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [f"col_{i}" for i in range(len(df.columns))]
+    return df
+
+
+def read_table(path: str, headerless: bool = False) -> pd.DataFrame:
     lower = path.lower()
     if lower.endswith(".csv"):
+        if headerless:
+            return _make_positional_columns(pd.read_csv(path, header=None, dtype=str, keep_default_na=False))
         return pd.read_csv(path)
     if lower.endswith(".xlsx") or lower.endswith(".xls"):
+        if headerless:
+            return _make_positional_columns(pd.read_excel(path, header=None, dtype=str, keep_default_na=False))
         return pd.read_excel(path)
     if lower.endswith(".json"):
-        return pd.read_json(path)
+        df = pd.read_json(path)
+        return _make_positional_columns(df) if headerless else df
     if lower.endswith(".jsonl") or lower.endswith(".ndjson"):
-        return pd.read_json(path, lines=True)
+        df = pd.read_json(path, lines=True)
+        return _make_positional_columns(df) if headerless else df
     if lower.endswith(".parquet"):
-        return pd.read_parquet(path)
+        df = pd.read_parquet(path)
+        return _make_positional_columns(df) if headerless else df
     raise ValueError("Only CSV, XLSX, JSON, JSONL, and Parquet files are supported.")
 
 
@@ -38,7 +51,10 @@ def _series_profile(series: pd.Series) -> dict:
     non_null = series.dropna()
     numeric = pd.to_numeric(non_null, errors="coerce")
     numeric_ratio = float(numeric.notna().mean()) if len(non_null) else 0.0
-    parsed_dates = pd.to_datetime(non_null, errors="coerce", dayfirst=True, format="mixed")
+    try:
+        parsed_dates = pd.to_datetime(non_null, errors="coerce", dayfirst=True, format="mixed")
+    except TypeError:
+        parsed_dates = pd.to_datetime(non_null, errors="coerce", dayfirst=True)
     date_ratio = float(parsed_dates.notna().mean()) if len(non_null) else 0.0
     info = {
         "name": str(series.name),
@@ -57,14 +73,7 @@ def _series_profile(series: pd.Series) -> dict:
             q3 = float(nums.quantile(0.75))
             iqr = q3 - q1
             outliers = nums[(nums < q1 - 1.5 * iqr) | (nums > q3 + 1.5 * iqr)] if iqr else nums.iloc[0:0]
-            info.update(
-                {
-                    "min": float(nums.min()),
-                    "max": float(nums.max()),
-                    "mean": float(nums.mean()),
-                    "outlier_count": int(len(outliers)),
-                }
-            )
+            info.update({"min": float(nums.min()), "max": float(nums.max()), "mean": float(nums.mean()), "outlier_count": int(len(outliers))})
     elif date_ratio >= 0.8:
         info["semantic_type"] = "date"
         dates = parsed_dates.dropna()
@@ -82,24 +91,22 @@ def representative_sample(df: pd.DataFrame, max_rows: int = 25) -> pd.DataFrame:
     head_n = max(3, max_rows // 3)
     tail_n = max(2, max_rows // 5)
     sample_parts = [df.head(head_n), df.tail(tail_n)]
-    interesting_indexes = set()
+    interesting_indexes: set[int] = set()
     for col in df.columns:
-        null_rows = df[df[col].isna()].head(2).index
-        interesting_indexes.update(int(i) for i in null_rows)
+        interesting_indexes.update(int(i) for i in df[df[col].isna()].head(2).index)
         numeric = pd.to_numeric(df[col], errors="coerce")
         if numeric.notna().sum() >= 5:
             interesting_indexes.update(int(i) for i in numeric.nlargest(2).index)
             interesting_indexes.update(int(i) for i in numeric.nsmallest(2).index)
     if interesting_indexes:
         sample_parts.append(df.loc[sorted(interesting_indexes)].head(max_rows))
-    sample = pd.concat(sample_parts).drop_duplicates().head(max_rows)
-    return sample.reset_index(drop=True)
+    return pd.concat(sample_parts).drop_duplicates().head(max_rows).reset_index(drop=True)
 
 
 def dataframe_profile(df: pd.DataFrame, max_rows: int = 10) -> dict:
     duplicate_rows = int(df.duplicated().sum()) if len(df) else 0
     columns = [_series_profile(df[col]) for col in df.columns]
-    warnings = []
+    warnings: list[str] = []
     for col in columns:
         if col["null_ratio"] >= 0.3:
             warnings.append(f"Column {col['name']} has {col['null_ratio']:.0%} missing values.")
@@ -119,7 +126,7 @@ def dataframe_profile(df: pd.DataFrame, max_rows: int = 10) -> dict:
 
 def dataframe_analysis(df: pd.DataFrame, max_rows: int = 10) -> dict:
     profile = dataframe_profile(df, max_rows=max_rows)
-    critical = []
+    critical: list[str] = []
     for col in profile["columns"]:
         if col["null_ratio"] >= 0.5:
             critical.append(f"Column {col['name']} is more than half empty.")
@@ -128,11 +135,7 @@ def dataframe_analysis(df: pd.DataFrame, max_rows: int = 10) -> dict:
     profile["summary"] = {
         "quality": "needs_attention" if critical else "ok",
         "critical_findings": critical,
-        "human_readable": (
-            "The table needs attention: " + " ".join(critical)
-            if critical
-            else "The table structure looks usable for transformation."
-        ),
+        "human_readable": "The table needs attention: " + " ".join(critical) if critical else "The table structure looks usable for transformation.",
     }
     return profile
 
@@ -148,8 +151,11 @@ def json_safe(value):
         return None
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
-    if pd.isna(value) and not isinstance(value, (str, bytes, list, dict, tuple)):
-        return None
+    try:
+        if pd.isna(value) and not isinstance(value, (str, bytes, list, dict, tuple)):
+            return None
+    except (TypeError, ValueError):
+        pass
     return value
 
 
@@ -158,8 +164,7 @@ def profile_to_json(profile: dict) -> str:
 
 
 def columns_signature(df: pd.DataFrame) -> str:
-    parts = [f"{col}:{df[col].dtype}" for col in df.columns]
-    return "|".join(parts)
+    return "|".join(f"{col}:{df[col].dtype}" for col in df.columns)
 
 
 def file_extension(path: str) -> str:
