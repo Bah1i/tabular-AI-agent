@@ -216,13 +216,3 @@ SESSION_COOKIE_SECURE=false
 docs/keycloak_testing.md
 ```
 
-## OpenCode.ai comparison
-
-Сравнение с OpenCode.ai лучше делать не как “модель против модели”, а как сравнение agentic engineering system и доменного табличного агента. Подробная матрица:
-
-```text
-docs/opencode_comparison.md
-```
-
-Главный тезис: OpenCode.ai — general-purpose coding agent, а Tabular AI Agent — специализированный агент для PBE/табличных трансформаций с формальной validation chain, sandbox, benchmark metrics и ala-lens audit trail.
-
