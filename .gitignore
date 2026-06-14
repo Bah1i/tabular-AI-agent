@@ -155,3 +155,12 @@ build/
 Thumbs.db
 desktop.ini
 *.reparse_backup_*
+
+# Local demo files kept out of git
+examples/customers_expected.csv
+examples/customers_source.csv
+examples/expected.csv
+examples/generate_demo_tables.py
+examples/large_sales_expected.csv
+examples/source.csv
+tabular_ai_agent.zip
