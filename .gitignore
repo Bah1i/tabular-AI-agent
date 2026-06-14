@@ -160,7 +160,6 @@ desktop.ini
 examples/customers_expected.csv
 examples/customers_source.csv
 examples/expected.csv
-examples/generate_demo_tables.py
 examples/large_sales_expected.csv
 examples/source.csv
 tabular_ai_agent.zip
